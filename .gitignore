@@ -20,3 +20,5 @@ simulation/src/applications/astra-sim
 
 **/build
 **/cmake-cache
+
+analysis/trace_reader

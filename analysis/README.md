@@ -9,7 +9,7 @@ Usage: please check `python fct_analysis.py -h` and read line 20-26 in `fct_anal
 ## Trace reader
 `trace_reader` is used to parse the .tr files output by the simulation.
 
-### Usage: 
+### Usage:
 1. `make trace_reader`
 
 2. `./trace_reader <.tr file> [filter_expr]`. The filter_expr is used to filter events. For example, `time > 2000010000` will display only events after 2000010000, `sip=0x0b000101&dip=0x0b000201` will display only events with sip=0x0b000101 and dip=0x0b000201. Feel free to play with it (we may come up with more detailed descriptions in the future. For now, please read trace_filter.hpp for more details).
