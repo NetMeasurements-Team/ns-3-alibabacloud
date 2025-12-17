@@ -367,6 +367,4 @@ pthread_key_t MtpInterface::g_key;
 
 std::atomic<bool> MtpInterface::g_inCriticalSection (false);
 
-std::atomic<bool> MtpInterface::g_e_inCriticalSection (false);
-
 } // namespace ns3

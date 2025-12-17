@@ -19,6 +19,6 @@ simulation/src/applications/astra-sim
 !simulation/cmake-cache/.gitkeep
 
 **/build
-**/cmake-cache
+**/cmake-cache*
 
 analysis/trace_reader

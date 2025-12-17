@@ -330,13 +330,10 @@ void RdmaHw::DeleteQueuePair(Ptr<RdmaQueuePair> qp){
 Ptr<RdmaRxQueuePair> RdmaHw::GetRxQp(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport, uint16_t pg, bool create){
     uint64_t key = ((uint64_t)dip << 32) | ((uint64_t)pg << 16) | (uint64_t)dport;
     #ifdef NS3_MTP
-    MtpInterface::explicitCriticalSection cs;
+    MtpInterface::CriticalSection cs;
     #endif
     auto it = m_rxQpMap.find(key);
     if (it != m_rxQpMap.end()){
-        #ifdef NS3_MTP
-        cs.ExitSection();
-        #endif
         return it->second;
     }
     if (create){
@@ -350,14 +347,8 @@ Ptr<RdmaRxQueuePair> RdmaHw::GetRxQp(uint32_t sip, uint32_t dip, uint16_t sport,
         q->m_ecn_source.qIndex = pg;
         // store in map
         m_rxQpMap[key] = q;
-        #ifdef NS3_MTP
-        cs.ExitSection();
-        #endif
         return q;
     }
-    #ifdef NS3_MTP
-    cs.ExitSection();
-    #endif
     return NULL;
 }
 
