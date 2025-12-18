@@ -383,7 +383,6 @@ int RdmaHw::SendPacketComplete(Ptr<Packet> p, CustomHeader &ch)
 {
 	uint16_t qIndex = ch.udp.pg;
 	uint16_t port = ch.udp.sport;
-	uint32_t seq = ch.udp.seq;
 	// uint8_t cnp = (ch.flags >> qbbHeader::FLAG_CNP) & 1;
 	// int i;
 	Ptr<RdmaQueuePair> qp = GetQp(ch.dip, port, qIndex);
@@ -391,9 +390,10 @@ int RdmaHw::SendPacketComplete(Ptr<Packet> p, CustomHeader &ch)
 	{
 		return 0;
 	}
-	uint32_t nic_idx = GetNicIdxOfQp(qp);
-	Ptr<QbbNetDevice> dev = m_nic[nic_idx].dev;
-	SendComplete(qp);
+    if (qp->GetBytesLeft() <= 0)
+    {
+        SendComplete(qp);
+    }
 }
 
 void RdmaHw::SendComplete(Ptr<RdmaQueuePair> qp)

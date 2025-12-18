@@ -621,7 +621,7 @@ namespace ns3 {
 				// std::cout<<" net: "<<this<<" QPindex: "<<qIndex<<" GetBytesLeft "<<lastQp->GetBytesLeft()<<" p->GetSize() "<<p->GetSize()<<std::endl;
 				// std::cout<<" net: "<<this<<" p->GetSize() "<<p->GetSize()<<std::endl;
 				// if(9000>=lastQp->GetBytesLeft()){
-				if(p->GetSize()<9000&&p->GetSize()>60){	//增加判断当前packet是否是ack报文的逻辑。
+				if(/*p->GetSize()<9000&&*/p->GetSize()>60){	//增加判断当前packet是否是ack报文的逻辑。
 				// if(lastQp->IsFinished()){s
 					// Simulator::Schedule(txTime,&sendfinsh,this);
 					CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
@@ -668,7 +668,7 @@ namespace ns3 {
 				// std::cout<<" net: "<<this<<" QPindex: "<<qIndex<<" GetBytesLeft "<<lastQp->GetBytesLeft()<<" p->GetSize() "<<p->GetSize()<<std::endl;
 				// std::cout<<" net: "<<this<<" p->GetSize() "<<p->GetSize()<<std::endl;
 				// if(9000>=lastQp->GetBytesLeft()){
-				if(p->GetSize()<9000&&p->GetSize()>60){	//增加判断当前packet是否是ack报文的逻辑。
+				if(/*p->GetSize()<9000&&*/p->GetSize()>60){	//增加判断当前packet是否是ack报文的逻辑。
 				// if(lastQp->IsFinished()){s
 					// Simulator::Schedule(txTime,&sendfinsh,this);
 					CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
