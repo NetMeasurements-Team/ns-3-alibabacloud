@@ -182,6 +182,9 @@ class RdmaHw : public Object
     void AddHeader(Ptr<Packet> p, uint16_t protocolNumber);
     static uint16_t EtherToPpp(uint16_t protocol);
 
+    void QpStartCC(Ptr<RdmaQueuePair> qp);
+    void QpStopCC(Ptr<RdmaQueuePair> qp);
+
     void RecoverQueue(Ptr<RdmaQueuePair> qp);
     void QpComplete(Ptr<RdmaQueuePair> qp);
     void QpCompleteMessage(Ptr<RdmaQueuePair> qp);

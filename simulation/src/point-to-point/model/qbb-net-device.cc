@@ -418,34 +418,34 @@ QbbNetDevice::DequeueAndTransmit(void)
         else
         { // no packet to send
             NS_LOG_INFO("PAUSE prohibits send at node " << m_node->GetId());
-            Time t = Simulator::GetMaximumSimulationTime();
+            //Time t = Simulator::GetMaximumSimulationTime();
             uint32_t fcount = m_rdmaEQ->m_qpGrp->m_qps.size();
             for (uint32_t i = 0; i < fcount; i++)
             {
                 Ptr<RdmaQueuePair> qp = m_rdmaEQ->m_qpGrp->m_qps[i];
                 qp->UpdateRate();
-                if (m_rdmaEQ->m_txDequeueMode == RdmaEgressQueue::TxDequeueMode::QP_AVAIL)
-                {
-                    t = Min(qp->m_nextAvail, t);
-                }
-                else if (m_rdmaEQ->m_txDequeueMode == RdmaEgressQueue::TxDequeueMode::DWRR)
-                {
-                    Time newt = qp->m_rate.CalculateBytesTxTime(
-                        (int64_t)m_rdmaEQ->m_token_per_round - qp->m_tokenBucket.m_tokens);
-                    newt = newt.GetTimeStep() == 0 ? NanoSeconds(1) : newt;
-                    t = Min(newt + Simulator::Now(), t);
-                }
+                // if (m_rdmaEQ->m_txDequeueMode == RdmaEgressQueue::TxDequeueMode::QP_AVAIL)
+                // {
+                //     t = Min(qp->m_nextAvail, t);
+                // }
+                // else if (m_rdmaEQ->m_txDequeueMode == RdmaEgressQueue::TxDequeueMode::DWRR)
+                // {
+                //     Time newt = qp->m_rate.CalculateBytesTxTime(
+                //         (int64_t)m_rdmaEQ->m_token_per_round - qp->m_tokenBucket.m_tokens);
+                //     newt = newt.GetTimeStep() == 0 ? NanoSeconds(1) : newt;
+                //     t = Min(newt + Simulator::Now(), t);
+                // }
             }
 #ifdef NS3_MTP
             cs.ExitSection();
 #endif
-            if (m_nextSend.IsExpired() && t < Simulator::GetMaximumSimulationTime()
-                && t > Simulator::Now())
-            {
-                m_nextSend = Simulator::Schedule(t - Simulator::Now(),
-                                                 &QbbNetDevice::DequeueAndTransmit,
-                                                 this);
-            }
+            // if (m_nextSend.IsExpired() && t < Simulator::GetMaximumSimulationTime()
+            //     && t > Simulator::Now())
+            // {
+            //     m_nextSend = Simulator::Schedule(t - Simulator::Now(),
+            //                                      &QbbNetDevice::DequeueAndTransmit,
+            //                                      this);
+            // }
         }
         return;
     }

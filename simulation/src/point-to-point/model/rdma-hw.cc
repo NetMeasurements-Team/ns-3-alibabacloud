@@ -260,7 +260,7 @@ RdmaHw::AddQueuePair(uint32_t src,
     qp->SetAppNotifyCallback(notifyAppFinish);
     qp->SetAppSentCallback(notifyAppSent);
 
-    if(size != 0) {
+    if (size != 0) {
         qp->PushMessage(size, 0, notifyAppFinish, notifyAppSent);
     }
 
@@ -287,6 +287,37 @@ RdmaHw::AddQueuePair(uint32_t src,
         Simulator::Now(),
         std::max(mtuPacket->GetSize(), m_nic[nic_idx].dev->m_rdmaEQ->m_token_per_round) * 2);
 
+    QpStartCC(qp);
+
+    // NVLS settings
+    if (nvls_enable == 1)
+    {
+        qp->nvls_enable = 1;
+    }
+    else
+    {
+        qp->nvls_enable = 0;
+    }
+    // Notify Nic
+    m_nic[nic_idx].dev->NewQp(qp);
+
+    return qp;
+}
+
+void
+RdmaHw::DeleteQueuePair(Ptr<RdmaQueuePair> qp)
+{
+    // remove qp from the m_qpMap
+    uint64_t key = GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
+    m_qpMap.erase(key);
+    qp_cnp.erase(key);
+    last_qp_cnp.erase(key);
+    last_qp_rate.erase(key);
+}
+
+void
+RdmaHw::QpStartCC(Ptr<RdmaQueuePair> qp)
+{
     TypeId congTypeId;
     switch (m_cc_mode) {
     case 1:
@@ -319,6 +350,8 @@ RdmaHw::AddQueuePair(uint32_t src,
         break;
     }
 
+    uint32_t nic_idx = GetNicIdxOfQp(qp);
+
     bool createAlgo = false;
     if (m_nic_coalesce_method == NicCoalesceMethod::PER_QP) {
         ObjectFactory congestionAlgorithmFactory;
@@ -328,24 +361,24 @@ RdmaHw::AddQueuePair(uint32_t src,
         createAlgo = true;
     } else if (m_nic_coalesce_method == NicCoalesceMethod::PER_IP) {
         auto& mp = m_nic_peripTable[nic_idx];
-        if (mp.find(dip.Get()) == mp.end()) {
+        if (mp.find(qp->dip.Get()) == mp.end()) {
             // Create new tableEntry
-            mp[dip.Get()] = CreateObject<NicPerIpTableEntry>();
+            mp[qp->dip.Get()] = CreateObject<NicPerIpTableEntry>();
 
             ObjectFactory congestionAlgorithmFactory;
             congestionAlgorithmFactory.SetTypeId(congTypeId);
             Ptr<RdmaCongestionOps> algo =
                 congestionAlgorithmFactory.Create<RdmaCongestionOps>();
-            mp[dip.Get()]->m_congestionControl = algo;
+            mp[qp->dip.Get()]->m_congestionControl = algo;
             createAlgo = true;
         }
-        qp->m_congestionControl = mp[dip.Get()]->m_congestionControl;
-        mp[dip.Get()]->qpNum++;
+        qp->m_congestionControl = mp[qp->dip.Get()]->m_congestionControl;
+        mp[qp->dip.Get()]->qpNum++;
     }
 
-    if(createAlgo){
+    if (createAlgo) {
         qp->m_congestionControl->SetHw(this, m_nic[nic_idx].dev);
-        qp->m_congestionControl->LazyInit(qp, m_bps);
+        qp->m_congestionControl->LazyInit(qp, qp->m_rate);
         if(!m_cc_configs.empty()){
             for(auto& cc_config : m_cc_configs){
                 qp->m_congestionControl->SetAttribute(cc_config.first, *(cc_config.second));
@@ -353,31 +386,29 @@ RdmaHw::AddQueuePair(uint32_t src,
             m_cc_configs.clear();
         }
     }
-
-    // NVLS settings
-    if (nvls_enable == 1)
-    {
-        qp->nvls_enable = 1;
-    }
-    else
-    {
-        qp->nvls_enable = 0;
-    }
-    // Notify Nic
-    m_nic[nic_idx].dev->NewQp(qp);
-
-    return qp;
 }
 
 void
-RdmaHw::DeleteQueuePair(Ptr<RdmaQueuePair> qp)
+RdmaHw::QpStopCC(Ptr<RdmaQueuePair> qp)
 {
-    // remove qp from the m_qpMap
-    uint64_t key = GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
-    m_qpMap.erase(key);
-    qp_cnp.erase(key);
-    last_qp_cnp.erase(key);
-    last_qp_rate.erase(key);
+    uint32_t nic_idx = GetNicIdxOfQp(qp);
+
+    qp->m_congestionControl->QpComplete(qp);
+    if (m_nic_coalesce_method == NicCoalesceMethod::PER_QP)
+    {
+        qp->m_congestionControl->AllComplete();
+    }
+    else if (m_nic_coalesce_method == NicCoalesceMethod::PER_IP)
+    {
+        m_nic_peripTable[nic_idx][qp->dip.Get()]->qpNum--;
+        if(m_nic_peripTable[nic_idx][qp->dip.Get()]->qpNum == 0)
+        {
+            // No qp exists
+            // std::cout<<"No qp exists, so delete the ip "<<qp->dip.Get()<<" from nic "<<nic_idx<<std::endl;
+            m_nic_peripTable[nic_idx][qp->dip.Get()]->m_congestionControl->AllComplete();
+            m_nic_peripTable[nic_idx].erase(qp->dip.Get());
+        }
+    }
 }
 
 Ptr<RdmaRxQueuePair>
@@ -796,23 +827,7 @@ RdmaHw::QpComplete(Ptr<RdmaQueuePair> qp)
     cs.ExitSection();
 #endif
 
-    qp->m_congestionControl->QpComplete(qp);
-    if (m_nic_coalesce_method == NicCoalesceMethod::PER_QP)
-    {
-        qp->m_congestionControl->AllComplete();
-    }
-    else if (m_nic_coalesce_method == NicCoalesceMethod::PER_IP)
-    {
-        m_nic_peripTable[nic_idx][qp->dip.Get()]->qpNum--;
-        if (m_nic_peripTable[nic_idx][qp->dip.Get()]->qpNum == 0)
-        {
-            // No qp exists
-            // std::cout<<"No qp exists, so delete the ip "<<qp->dip.Get()<<" from nic
-            // "<<nic_idx<<std::endl;
-            m_nic_peripTable[nic_idx][qp->dip.Get()]->m_congestionControl->AllComplete();
-            m_nic_peripTable[nic_idx].erase(qp->dip.Get());
-        }
-    }
+    QpStopCC(qp);
 
     // This callback will log info
     // It may also delete the rxQp on the receiver
