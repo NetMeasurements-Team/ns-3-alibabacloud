@@ -14,6 +14,8 @@
 #include <cmath>
 
 namespace ns3 {
+NS_LOG_COMPONENT_DEFINE("SwitchNode");
+NS_OBJECT_ENSURE_REGISTERED(SwitchNode);
 
 TypeId SwitchNode::GetTypeId (void)
 {
@@ -25,6 +27,11 @@ TypeId SwitchNode::GetTypeId (void)
 			BooleanValue(false),
 			MakeBooleanAccessor(&SwitchNode::m_ecnEnabled),
 			MakeBooleanChecker())
+    .AddAttribute("PfcEnabled",
+            "Enable PFC.",
+            BooleanValue(true),
+            MakeBooleanAccessor(&SwitchNode::m_pfcEnabled),
+            MakeBooleanChecker())
 	.AddAttribute("CcMode",
 			"CC mode.",
 			UintegerValue(0),
@@ -40,6 +47,11 @@ TypeId SwitchNode::GetTypeId (void)
 			UintegerValue(9000),
 			MakeUintegerAccessor(&SwitchNode::m_maxRtt),
 			MakeUintegerChecker<uint32_t>())
+    .AddAttribute("ForwardDelay",
+            "forwarding delay of the switch (us)",
+            DoubleValue(0.0),
+            MakeDoubleAccessor(&SwitchNode::m_forwardDelay),
+            MakeDoubleChecker<double>())
   ;
   return tid;
 }
@@ -90,18 +102,22 @@ int SwitchNode::GetOutDev(Ptr<const Packet> p, CustomHeader &ch){
 }
 
 void SwitchNode::CheckAndSendPfc(uint32_t inDev, uint32_t qIndex){
-	Ptr<QbbNetDevice> device = DynamicCast<QbbNetDevice>(m_devices[inDev]);
-	if (m_mmu->CheckShouldPause(inDev, qIndex)){
-		device->SendPfc(qIndex, 0);
-		m_mmu->SetPause(inDev, qIndex);
-	}
+    if (m_pfcEnabled) {
+        Ptr<QbbNetDevice> device = DynamicCast<QbbNetDevice>(m_devices[inDev]);
+        if (m_mmu->CheckShouldPause(inDev, qIndex)){
+            device->SendPfc(qIndex, 0);
+            m_mmu->SetPause(inDev, qIndex);
+        }
+    }
 }
 void SwitchNode::CheckAndSendResume(uint32_t inDev, uint32_t qIndex){
-	Ptr<QbbNetDevice> device = DynamicCast<QbbNetDevice>(m_devices[inDev]);
-	if (m_mmu->CheckShouldResume(inDev, qIndex)){
-		device->SendPfc(qIndex, 1);
-		m_mmu->SetResume(inDev, qIndex);
-	}
+    if (m_pfcEnabled) {
+        Ptr<QbbNetDevice> device = DynamicCast<QbbNetDevice>(m_devices[inDev]);
+        if (m_mmu->CheckShouldResume(inDev, qIndex)){
+            device->SendPfc(qIndex, 1);
+            m_mmu->SetResume(inDev, qIndex);
+        }
+    }
 }
 
 void SwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch){
@@ -192,7 +208,7 @@ void SwitchNode::ClearTable(){
 
 // This function can only be called in switch mode
 bool SwitchNode::SwitchReceiveFromDevice(Ptr<NetDevice> device, Ptr<Packet> packet, CustomHeader &ch){
-	SendToDev(packet, ch);
+    Simulator::Schedule(MicroSeconds(m_forwardDelay), &SwitchNode::SendToDev, this, packet, ch);
 	return true;
 }
 

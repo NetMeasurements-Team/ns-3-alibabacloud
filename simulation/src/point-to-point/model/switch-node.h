@@ -29,10 +29,12 @@ class SwitchNode : public Node{
 
 protected:
 	bool m_ecnEnabled;
+    bool m_pfcEnabled;
 	uint32_t m_ccMode;
 	uint64_t m_maxRtt;
 
 	uint32_t m_ackHighPrio; // set high priority for ACK/NACK
+    double m_forwardDelay;
 
 private:
 	int GetOutDev(Ptr<const Packet>, CustomHeader &ch);

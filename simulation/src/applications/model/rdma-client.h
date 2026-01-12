@@ -25,14 +25,16 @@
 
 #include "ns3/application.h"
 #include "ns3/event-id.h"
-#include "ns3/ptr.h"
 #include "ns3/ipv4-address.h"
+#include "ns3/ptr.h"
 #include <ns3/rdma.h>
 
-namespace ns3 {
+namespace ns3
+{
 
 class Socket;
 class Packet;
+class RdmaQueuePair;
 
 /**
  * \ingroup rdmaclientserver
@@ -42,48 +44,70 @@ class Packet;
  */
 class RdmaClient : public Application
 {
-public:
-  static TypeId
-  GetTypeId (void);
+  public:
+    static TypeId GetTypeId(void);
 
-  RdmaClient ();
+    RdmaClient();
 
-  virtual ~RdmaClient ();
+    virtual ~RdmaClient();
 
-  /**
-   * \brief set the remote address and port
-   * \param ip remote IP address
-   * \param port remote port
-   */
-  void SetRemote (Ipv4Address ip, uint16_t port);
-  void SetLocal (Ipv4Address ip, uint16_t port);
-  void SetPG (uint16_t pg);
-  void SetSize(uint64_t size);
-  void SetFn(void (*msg_handler)(void* fun_arg), void* fun_arg);
-  void Finish();
-  void Sent();
+    /**
+     * \brief set the remote address and port
+     * \param ip remote IP address
+     * \param port remote port
+     */
+    void SetRemote(Ipv4Address ip, uint16_t port);
+    void SetLocal(Ipv4Address ip, uint16_t port);
+    void SetPG(uint16_t pg);
+    void SetSize(uint64_t size);
+    void SetFn(void (*msg_handler)(void* fun_arg), void* fun_arg);
+    /**
+     * \brief callback invoked when a sent message has been fully acknowledged
+     */
+    void Finish();
+    /**
+     * \brief callback invoked when a message has been fully sent
+     */
+    void Sent();
 
-protected:
-  virtual void DoDispose (void);
+    Ptr<RdmaQueuePair> m_qp;
+    /**
+     * \brief push a message to be sent on the associated qp
+     */
+    void PushMessageToQp(uint64_t size, uint64_t curr_flow_num);
+    /**
+     * \brief terminate the associated qp
+     */
+    void FinishQp();
 
-private:
+    uint16_t GetSourcePort() {
+        return m_sport;
+    }
 
-  virtual void StartApplication (void);
-  virtual void StopApplication (void);
+  protected:
+    virtual void DoDispose(void);
 
-  uint64_t m_size;
-  uint16_t m_pg;
+  private:
+    virtual void StartApplication(void);
+    virtual void StopApplication(void);
 
-  Ipv4Address m_sip, m_dip;
-  uint16_t m_sport, m_dport;
-  uint32_t m_win; // bound of on-the-fly packets
-  uint64_t m_baseRtt; // base Rtt
-  void (*msg_handler)(void* fun_arg);
-  void* fun_arg;
-  uint64_t tag; 
-  uint64_t src; 
-  uint64_t dest; 
-  uint32_t nvls_enable;
+    uint64_t m_size;
+    uint16_t m_pg;
+
+    Ipv4Address m_sip, m_dip;
+    uint16_t m_sport, m_dport;
+    uint32_t m_win;     // bound of on-the-fly packets
+    uint64_t m_baseRtt; // base Rtt
+    void (*msg_handler)(void* fun_arg);
+    void* fun_arg;
+    uint64_t tag;
+    uint64_t src;
+    uint64_t dest;
+    uint32_t nvls_enable;
+    /**
+     * \brief if true, the qp is destroyed immediately when the message queue is empty
+     */
+    bool m_passiveDestroy;
 };
 
 } // namespace ns3
