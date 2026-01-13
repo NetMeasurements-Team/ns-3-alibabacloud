@@ -75,11 +75,16 @@ class RdmaHw : public Object
     uint32_t nvls_enable;
     std::set<uint32_t> nvswitch_set;
 
-    // qp complete callback
+    // callback triggered when a qp finishes
     typedef Callback<void, Ptr<RdmaQueuePair>> QpCompleteCallback;
     QpCompleteCallback m_qpCompleteCallback;
+    // callback triggered when the src sends the last packet of a message
     typedef Callback<void, Ptr<RdmaQueuePair>, uint64_t, uint64_t> SendCompleteCallback;
     SendCompleteCallback m_sendCompleteCallback;
+    // callback triggered when the dst sends the ack to the last packet of a message
+    typedef Callback<void, Ptr<RdmaRxQueuePair>, uint64_t, uint64_t> RecvCompleteCallback;
+    RecvCompleteCallback m_recvCompleteCallback;
+    // callback triggered when the src receives the ack to the last packet of a message
     typedef Callback<void, Ptr<RdmaQueuePair>, uint64_t, uint64_t> MessageCompleteCallback;
     MessageCompleteCallback m_messageCompleteCallback;
 
@@ -107,13 +112,15 @@ class RdmaHw : public Object
 
     void SetNode(Ptr<Node> node);
     /**
-     * Set up shared data and callbacks with the QbbNetDevice
-     * @param cb
-     * @param send_cb
-     * @param message_cb
+     * setup shared data and callbacks with the QbbNetDevice
+     * @param cb callback invoked when the QP has finished and is going to be destroyed
+     * @param send_cb callback invoked whenever the sender sends the last packet of a message
+     * @param recv_cb callback invoked whenever the receiver receives the last packet of a message
+     * @param message_cb callback invoked whenever the sender receives the last ack of a message
      */
     void Setup(QpCompleteCallback cb,
                SendCompleteCallback send_cb,
+               RecvCompleteCallback recv_cb,
                MessageCompleteCallback message_cb);
     /**
      * Get the lookup key for m_qpMap
@@ -159,6 +166,7 @@ class RdmaHw : public Object
      */
     uint32_t GetNicIdxOfRxQp(Ptr<RdmaRxQueuePair> q);
     void DeleteRxQp(uint32_t dip, uint16_t pg, uint16_t dport);
+    void UpdateRxQPLastSeq(Ptr<RdmaQueuePair> qp);
 
     int ReceiveUdp(Ptr<Packet> p, CustomHeader& ch);
     int ReceiveCnp(Ptr<Packet> p, CustomHeader& ch);
@@ -191,6 +199,7 @@ class RdmaHw : public Object
     void SetLinkDown(Ptr<QbbNetDevice> dev);
 
     int SendPacketComplete(Ptr<Packet> p, CustomHeader& ch);
+    void RecvComplete(Ptr<RdmaRxQueuePair> rxQp);
     void SendComplete(Ptr<RdmaQueuePair> qp);
 
     // call this function after the NIC is setup

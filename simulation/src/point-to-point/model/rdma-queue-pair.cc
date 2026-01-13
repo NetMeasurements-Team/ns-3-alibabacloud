@@ -136,6 +136,26 @@ RdmaQueuePair::GetBytesLeft()
     return actual_size;
 }
 
+void
+RdmaRxQueuePair::PushMessage(
+    uint64_t size,
+    uint64_t curr_flow_num)
+{
+    // TODO does this need to be guarded?
+    RdmaMessage msg;
+    msg.m_size = size;
+    msg.m_cur_id = curr_flow_num;
+    if (m_messages.empty())
+    {
+        msg.m_startSeq = ReceiverNextExpectedSeq;
+    }
+    else
+    {
+        msg.m_startSeq = m_messages.back().m_startSeq + m_messages.back().m_size;
+    }
+    m_messages.push(msg);
+}
+
 uint32_t
 RdmaQueuePair::GetHash(void)
 {

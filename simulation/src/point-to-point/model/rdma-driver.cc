@@ -20,6 +20,10 @@ RdmaDriver::GetTypeId(void)
                             "A qp Send completes.",
                             MakeTraceSourceAccessor(&RdmaDriver::m_traceSendComplete),
                             "ns3::RdmaDriver::SendComplete")
+            .AddTraceSource("RecvComplete",
+                            "A qp Recv completes.",
+                            MakeTraceSourceAccessor(&RdmaDriver::m_traceRecvComplete),
+                            "ns3::RdmaDriver::RecvComplete")
             .AddTraceSource("MessageComplete",
                             "A qp Message completes.",
                             MakeTraceSourceAccessor(&RdmaDriver::m_traceMessageComplete),
@@ -69,6 +73,7 @@ RdmaDriver::Init(void)
     m_rdma->SetNode(m_node);
     m_rdma->Setup(MakeCallback(&RdmaDriver::QpComplete, this),
                   MakeCallback(&RdmaDriver::SendComplete, this),
+                  MakeCallback(&RdmaDriver::RecvComplete, this),
                   MakeCallback(&RdmaDriver::MessageComplete, this));
 }
 
@@ -144,9 +149,18 @@ RdmaDriver::SendComplete(Ptr<RdmaQueuePair> q, uint64_t size, uint64_t curr_flow
     m_traceSendComplete(q, size, curr_flow_id);
 }
 
+void RdmaDriver::RecvComplete(Ptr<RdmaRxQueuePair> q, uint64_t size, uint64_t curr_flow_id) {
+    m_traceRecvComplete(q, size, curr_flow_id);
+}
+
 void
 RdmaDriver::MessageComplete(Ptr<RdmaQueuePair> q, uint64_t size, uint64_t curr_flow_id)
 {
     m_traceMessageComplete(q, size, curr_flow_id);
+}
+
+Ptr<RdmaRxQueuePair>
+RdmaDriver::AddRxQueuePair(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport, uint16_t pg) {
+    return m_rdma->GetRxQp(sip, dip, sport, dport, pg, true);
 }
 } // namespace ns3

@@ -155,8 +155,17 @@ class RdmaRxQueuePair : public Object
     uint32_t m_lastNACK;
     EventId QcnTimerEvent; // if destroy this rxQp, remember to cancel this timer
 
+    class RdmaMessage {
+    public:
+        uint64_t m_size;
+        uint64_t m_startSeq;
+        uint64_t m_cur_id;
+    };
+    std::queue<RdmaMessage> m_messages;
+
     static TypeId GetTypeId(void);
     RdmaRxQueuePair();
+    void PushMessage(uint64_t size, uint64_t curr_flow_num);
     uint32_t GetHash(void);
 };
 

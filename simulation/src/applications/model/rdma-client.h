@@ -27,6 +27,7 @@
 #include "ns3/event-id.h"
 #include "ns3/ipv4-address.h"
 #include "ns3/ptr.h"
+#include "ns3/rdma-queue-pair.h"
 #include <ns3/rdma.h>
 
 namespace ns3
@@ -71,6 +72,7 @@ class RdmaClient : public Application
     void Sent();
 
     Ptr<RdmaQueuePair> m_qp;
+    Ptr<RdmaRxQueuePair> m_rxQp;
     /**
      * \brief push a message to be sent on the associated qp
      */

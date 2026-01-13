@@ -147,6 +147,7 @@ RdmaHw::SetNode(Ptr<Node> node)
 void
 RdmaHw::Setup(QpCompleteCallback cb,
               SendCompleteCallback send_cb,
+              RecvCompleteCallback recv_cb,
               MessageCompleteCallback message_cb)
 {
     tx_bytes.resize(m_nic.size());
@@ -175,6 +176,7 @@ RdmaHw::Setup(QpCompleteCallback cb,
     // setup qp complete callback
     m_qpCompleteCallback = cb;
     m_sendCompleteCallback = send_cb;
+    m_recvCompleteCallback = recv_cb;
     m_messageCompleteCallback = message_cb;
 }
 
@@ -521,9 +523,9 @@ RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader& ch)
     uint8_t ecnbits = ch.GetIpv4EcnBits();
 
     uint32_t payload_size = p->GetSize() - ch.GetSerializedSize();
-    // TODO find corresponding rx queue pair
     Ptr<RdmaRxQueuePair> rxQp =
-        GetRxQp(ch.dip, ch.sip, ch.udp.dport, ch.udp.sport, ch.udp.pg, true);
+        GetRxQp(ch.dip, ch.sip, ch.udp.dport, ch.udp.sport, ch.udp.pg, false);
+    NS_ASSERT(rxQp);
     if (ecnbits != 0)
     {
         rxQp->m_ecn_source.ecnbits |= ecnbits;
@@ -605,6 +607,16 @@ RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader& ch)
         else
         {
             m_nic[nic_idx].dev->TriggerTransmit();
+        }
+    }
+    if (x == 1)
+    {
+        NS_ASSERT(!rxQp->m_messages.empty());
+        RdmaRxQueuePair::RdmaMessage msg = rxQp->m_messages.front();
+        if (ch.udp.seq + payload_size == msg.m_startSeq + msg.m_size)
+        {
+            //std::cout << " - it is the last packet" << std::endl;
+            RecvComplete(rxQp);
         }
     }
     return 0;
@@ -841,6 +853,19 @@ RdmaHw::QpComplete(Ptr<RdmaQueuePair> qp)
 }
 
 void
+RdmaHw::RecvComplete(Ptr<RdmaRxQueuePair> rxQp)
+{
+    // qp->m_messages.front().m_notifyAppFinish();
+    // callback
+    if (!m_recvCompleteCallback.IsNull())
+    {
+        RdmaRxQueuePair::RdmaMessage msg = rxQp->m_messages.front();
+        rxQp->m_messages.pop();
+        m_recvCompleteCallback(rxQp, msg.m_size, msg.m_cur_id);
+    }
+}
+
+void
 RdmaHw::QpCompleteMessage(Ptr<RdmaQueuePair> qp)
 {
     // qp->m_messages.front().m_notifyAppFinish();
@@ -848,7 +873,10 @@ RdmaHw::QpCompleteMessage(Ptr<RdmaQueuePair> qp)
     RdmaQueuePair::RdmaMessage msg = qp->m_messages.front();
     qp->FinishMessage();
 
-    m_messageCompleteCallback(qp, msg.m_size, msg.m_cur_id);
+    if (!m_messageCompleteCallback.IsNull())
+    {
+        m_messageCompleteCallback(qp, msg.m_size, msg.m_cur_id);
+    }
     if (!qp->m_messages.empty())
     {
         // Have more messages to send

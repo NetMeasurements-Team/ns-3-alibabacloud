@@ -22,6 +22,7 @@ class RdmaDriver : public Object
     // trace
     TracedCallback<Ptr<RdmaQueuePair>> m_traceQpComplete;
     TracedCallback<Ptr<RdmaQueuePair>, uint64_t, uint64_t> m_traceSendComplete;
+    TracedCallback<Ptr<RdmaRxQueuePair>, uint64_t, uint64_t> m_traceRecvComplete;
     TracedCallback<Ptr<RdmaQueuePair>, uint64_t, uint64_t> m_traceMessageComplete;
 
     static TypeId GetTypeId(void);
@@ -51,6 +52,11 @@ class RdmaDriver : public Object
                                     uint64_t baseRtt,
                                     Callback<void> notifyAppFinish,
                                     Callback<void> notifyAppSent);
+    Ptr<RdmaRxQueuePair> AddRxQueuePair(uint32_t sip,
+                                        uint32_t dip,
+                                        uint16_t sport,
+                                        uint16_t dport,
+                                        uint16_t pg);
     void FinishQueuePair(Ptr<RdmaQueuePair> q);
 
     // enable NVLS
@@ -60,6 +66,7 @@ class RdmaDriver : public Object
     // callback when qp completes
     void QpComplete(Ptr<RdmaQueuePair> q);
     void SendComplete(Ptr<RdmaQueuePair> q, uint64_t size, uint64_t curr_flow_id);
+    void RecvComplete(Ptr<RdmaRxQueuePair> q, uint64_t size, uint64_t curr_flow_id);
     void MessageComplete(Ptr<RdmaQueuePair> q, uint64_t size, uint64_t curr_flow_id);
 };
 

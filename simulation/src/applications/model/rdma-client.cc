@@ -24,6 +24,7 @@
 #include "ns3/ipv4-address.h"
 #include "ns3/ipv4-end-point.h"
 #include "ns3/log.h"
+#include "ns3/node-list.h"
 #include "ns3/nstime.h"
 #include "ns3/qbb-net-device.h"
 #include "ns3/random-variable.h"
@@ -32,6 +33,7 @@
 #include "ns3/socket.h"
 #include "ns3/uinteger.h"
 #include <ns3/rdma-driver.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -216,6 +218,13 @@ RdmaClient::StartApplication(void)
                               m_baseRtt,
                               MakeCallback(&RdmaClient::Finish, this),
                               MakeCallback(&RdmaClient::Sent, this));
+    Ptr<Node> other = NodeList::GetNode(m_qp->m_dest);
+    Ptr<RdmaDriver> peer_rdma = other->GetObject<RdmaDriver>();
+    m_rxQp = peer_rdma->AddRxQueuePair(m_dip.Get(), m_sip.Get(), m_dport, m_sport, m_pg);
+    if (m_size > 0)
+    {
+        m_rxQp->PushMessage(m_size, 0);
+    }
 }
 
 void
@@ -232,6 +241,7 @@ RdmaClient::PushMessageToQp(uint64_t size, uint64_t curr_flow_num)
                       curr_flow_num,
                       MakeCallback(&RdmaClient::Finish, this),
                       MakeCallback(&RdmaClient::Sent, this));
+    m_rxQp->PushMessage(size, curr_flow_num);
 
     Ptr<RdmaDriver> rdma = GetNode()->GetObject<RdmaDriver>();
     Ptr<QbbNetDevice> nic = rdma->m_rdma->GetNicOfQp(m_qp);
