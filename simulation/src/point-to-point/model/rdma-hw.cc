@@ -507,6 +507,7 @@ RdmaHw::SendPacketComplete(Ptr<Packet> p, CustomHeader& ch)
     {
         SendComplete(qp);
     }
+    return 0;
 }
 
 void
