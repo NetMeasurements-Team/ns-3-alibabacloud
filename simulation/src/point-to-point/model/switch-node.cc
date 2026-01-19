@@ -52,12 +52,18 @@ TypeId SwitchNode::GetTypeId (void)
             DoubleValue(0.0),
             MakeDoubleAccessor(&SwitchNode::m_forwardDelay),
             MakeDoubleChecker<double>())
+    .AddAttribute("PacketSpraying",
+            "Set to true to randomly route packets of a flow among ECMP",
+            BooleanValue(false),
+            MakeBooleanAccessor(&SwitchNode::m_packetSpraying),
+            MakeBooleanChecker())
   ;
   return tid;
 }
 
 SwitchNode::SwitchNode(){
 	m_ecmpSeed = m_id;
+    m_rand = CreateObject<UniformRandomVariable>();
 	m_node_type = 1;
 	m_mmu = CreateObject<SwitchMmu>();
 	for (uint32_t i = 0; i < pCnt; i++)
@@ -83,21 +89,27 @@ int SwitchNode::GetOutDev(Ptr<const Packet> p, CustomHeader &ch){
 	// entry found
 	auto &nexthops = entry->second;
 
-	// pick one next hop based on hash
-	union {
-		uint8_t u8[4+4+2+2];
-		uint32_t u32[3];
-	} buf;
-	buf.u32[0] = ch.sip;
-	buf.u32[1] = ch.dip;
-	if (ch.l3Prot == 0x6)
-		buf.u32[2] = ch.tcp.sport | ((uint32_t)ch.tcp.dport << 16);
-	else if (ch.l3Prot == 0x11)
-		buf.u32[2] = ch.udp.sport | ((uint32_t)ch.udp.dport << 16);
-	else if (ch.l3Prot == 0xFC || ch.l3Prot == 0xFD)
-		buf.u32[2] = ch.ack.sport | ((uint32_t)ch.ack.dport << 16);
+    uint32_t idx;
+    if (m_packetSpraying) {
+        // pick a random next hop
+        idx = m_rand->GetInteger(0, nexthops.size() - 1);
+    } else {
+        // pick one next hop based on hash
+        union {
+            uint8_t u8[4+4+2+2];
+            uint32_t u32[3];
+        } buf;
+        buf.u32[0] = ch.sip;
+        buf.u32[1] = ch.dip;
+        if (ch.l3Prot == 0x6)
+            buf.u32[2] = ch.tcp.sport | ((uint32_t)ch.tcp.dport << 16);
+        else if (ch.l3Prot == 0x11)
+            buf.u32[2] = ch.udp.sport | ((uint32_t)ch.udp.dport << 16);
+        else if (ch.l3Prot == 0xFC || ch.l3Prot == 0xFD)
+            buf.u32[2] = ch.ack.sport | ((uint32_t)ch.ack.dport << 16);
 
-	uint32_t idx = EcmpHash(buf.u8, 12, m_ecmpSeed) % nexthops.size();
+        idx = EcmpHash(buf.u8, 12, m_ecmpSeed) % nexthops.size();
+    }
 	return nexthops[idx];
 }
 
@@ -361,7 +373,7 @@ void SwitchNode::PrintSwitchQlen(FILE* qlen_output){
 			continue;
 		}
 		for(uint32_t j=0; j < qCnt; ++j){
-			fprintf(qlen_output, "%lu, %u, %u, %u, %u, %lu\n", Simulator::Now().GetTimeStep(), m_id, i, j, m_mmu->egress_bytes[i][j], port_len);
+			fprintf(qlen_output, "%lu, %u, %u, %u, %lu, %lu\n", Simulator::Now().GetTimeStep(), m_id, i, j, m_mmu->egress_bytes[i][j], port_len);
 			fflush(qlen_output);
 		}
 		last_port_qlen[i] = port_len;

@@ -6,6 +6,7 @@
 #include "qbb-net-device.h"
 #include "switch-mmu.h"
 #include "pint.h"
+#include "ns3/random-variable-stream.h"
 
 namespace ns3 {
 
@@ -15,6 +16,7 @@ class SwitchNode : public Node{
 	static const uint32_t pCnt = 1025;	// Number of ports used
 	static const uint32_t qCnt = 8;	// Number of queues/priorities used
 	uint32_t m_ecmpSeed;
+	Ptr<UniformRandomVariable> m_rand;
 	std::unordered_map<uint32_t, std::vector<int> > m_rtTable; // map from ip address (u32) to possible ECMP port (index of dev)
 	std::set<uint32_t> active_ports;	// record active ports in switch
 
@@ -30,6 +32,7 @@ class SwitchNode : public Node{
 protected:
 	bool m_ecnEnabled;
     bool m_pfcEnabled;
+    bool m_packetSpraying;
 	uint32_t m_ccMode;
 	uint64_t m_maxRtt;
 
