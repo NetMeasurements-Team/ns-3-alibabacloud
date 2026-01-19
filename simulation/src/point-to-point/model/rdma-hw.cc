@@ -195,26 +195,22 @@ RdmaHw::GetNicIdxOfQp(Ptr<RdmaQueuePair> qp)
         m_rtTable_nxthop_nvswitch.count(qp->dip.Get()) != 0)
     { // src and dst are in the same server, communicate through nvswitch
         auto& v = m_rtTable_nxthop_nvswitch[qp->dip.Get()];
-        if (v.size() > 0)
+        if (v.empty())
         {
-            return v[qp->GetHash() % v.size()];
+            throw std::runtime_error("No path found from node " + std::to_string(src) +
+                                     " to node " + std::to_string(dst));
         }
-        else
-        {
-            NS_ASSERT_MSG(false, "We assume at least one NIC is alive");
-        }
+        return v[qp->GetHash() % v.size()];
     }
     else
     { // src and dst don't in the same server, communicate through swicth
         auto& v = m_rtTable[qp->dip.Get()];
-        if (v.size() > 0)
+        if (v.empty())
         {
-            return v[qp->GetHash() % v.size()];
+            throw std::runtime_error("No path found from node " + std::to_string(src) +
+                                     " to node " + std::to_string(dst));
         }
-        else
-        {
-            NS_ASSERT_MSG(false, "We assume at least one NIC is alive");
-        }
+        return v[qp->GetHash() % v.size()];
     }
 }
 
