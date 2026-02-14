@@ -310,6 +310,12 @@ RdmaRxQueuePair::RdmaRxQueuePair()
     m_lastNACK = 0;
 }
 
+void
+RdmaRxQueuePair::SetTag(uint64_t tag)
+{
+    m_tag = tag;
+}
+
 uint32_t
 RdmaRxQueuePair::GetHash(void)
 {

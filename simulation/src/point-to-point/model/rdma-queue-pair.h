@@ -148,6 +148,7 @@ class RdmaRxQueuePair : public Object
     ECNAccount m_ecn_source;
     uint32_t sip, dip;
     uint16_t sport, dport;
+    uint64_t m_tag;
     uint16_t m_ipid;
     uint64_t ReceiverNextExpectedSeq;
     Time m_nackTimer;
@@ -165,6 +166,7 @@ class RdmaRxQueuePair : public Object
 
     static TypeId GetTypeId(void);
     RdmaRxQueuePair();
+    void SetTag(uint64_t tag);
     void PushMessage(uint64_t size, uint64_t curr_flow_num);
     uint32_t GetHash(void);
 };
