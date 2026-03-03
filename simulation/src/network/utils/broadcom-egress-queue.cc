@@ -17,6 +17,7 @@
 */
 #include <iostream>
 #include <stdio.h>
+#include "ns3/abort.h"
 #include "ns3/log.h"
 #include "ns3/enum.h"
 #include "ns3/uinteger.h"
@@ -79,7 +80,8 @@ namespace ns3 {
 
 		if (m_bytesInQueueTotal + p->GetSize() < m_maxBytes)  //infinite queue
 		{
-			m_queues[qIndex]->Enqueue(p);
+			NS_ABORT_MSG_IF(!m_queues[qIndex]->Enqueue(p),
+				"BEgressQueue inner queue rejected a packet; accounting cannot continue");
 			m_bytesInQueueTotal += p->GetSize();
 			m_bytesInQueue[qIndex] += p->GetSize();
 		}
@@ -191,7 +193,8 @@ namespace ns3 {
 		NS_LOG_FUNCTION(this << p);
 		if (m_bytesInQueueTotal + p->GetSize() < m_maxBytes)
 		{
-			m_queues[qIndex]->Enqueue(p);
+			NS_ABORT_MSG_IF(!m_queues[qIndex]->Enqueue(p),
+				"BEgressQueue inner queue rejected a packet; accounting cannot continue");
 			m_bytesInQueueTotal += p->GetSize();
 			m_bytesInQueue[qIndex] += p->GetSize();
 		}
