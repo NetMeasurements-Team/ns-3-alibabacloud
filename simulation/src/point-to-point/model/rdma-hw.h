@@ -49,6 +49,7 @@ class RdmaHw : public Object
     double m_nack_interval;
     uint32_t m_chunk;
     uint32_t m_ack_interval;
+    size_t m_max_out_of_seq;
     bool m_backto0;
     bool m_var_win;
     bool m_rateBound;

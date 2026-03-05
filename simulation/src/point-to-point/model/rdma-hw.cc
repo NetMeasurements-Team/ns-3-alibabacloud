@@ -112,7 +112,12 @@ RdmaHw::GetTypeId(void)
                           "The Cnp interval",
                           TimeValue(MicroSeconds(4)),
                           MakeTimeAccessor(&RdmaHw::m_cnp_interval),
-                          MakeTimeChecker());
+                          MakeTimeChecker())
+            .AddAttribute("MaxOutOfSeq",
+                          "Max number of out of sequence packets stored before a NACK",
+                          UintegerValue(0),
+                          MakeUintegerAccessor(&RdmaHw::m_max_out_of_seq),
+                          MakeUintegerChecker<size_t>());
     return tid;
 }
 
@@ -510,8 +515,16 @@ void
 RdmaHw::SendComplete(Ptr<RdmaQueuePair> qp)
 {
     NS_ASSERT(!m_sendCompleteCallback.IsNull());
-    RdmaQueuePair::RdmaMessage msg = qp->m_messages.front();
-    m_sendCompleteCallback(qp, msg.m_size, msg.m_cur_id);
+    if (qp->m_messages.empty())
+    {
+        return;
+    }
+    RdmaQueuePair::RdmaMessage& msg = qp->m_messages.front();
+    if (!msg.m_sent)
+    {
+        msg.m_sent = true;
+        m_sendCompleteCallback(qp, msg.m_size, msg.m_cur_id);
+    }
 }
 
 int
@@ -610,7 +623,7 @@ RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader& ch)
     {
         NS_ASSERT(!rxQp->m_messages.empty());
         RdmaRxQueuePair::RdmaMessage msg = rxQp->m_messages.front();
-        if (ch.udp.seq + payload_size == msg.m_startSeq + msg.m_size)
+        if (rxQp->ReceiverNextExpectedSeq == msg.m_startSeq + msg.m_size)
         {
             //std::cout << " - it is the last packet" << std::endl;
             RecvComplete(rxQp);
@@ -754,6 +767,21 @@ RdmaHw::ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size)
     if (seq == expected)
     {
         q->ReceiverNextExpectedSeq = expected + size;
+
+        // handle any previously received out of sequence packets
+        while (!q->m_outOfSeqPackets.empty())
+        {
+            const auto nxt = q->m_outOfSeqPackets.begin();
+            uint64_t ooo_seq  = nxt->first;
+            uint32_t ooo_size = nxt->second;
+            q->m_outOfSeqPackets.erase(nxt);
+            if (const int ret = ReceiverCheckSeq(ooo_seq, q, ooo_size); ret != 1 && ret != 5)
+            {
+                q->m_outOfSeqPackets[ooo_seq] = ooo_size;
+                break;
+            }
+        }
+
         if (q->ReceiverNextExpectedSeq >= q->m_milestone_rx)
         {
             q->m_milestone_rx += m_ack_interval;
@@ -770,6 +798,20 @@ RdmaHw::ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size)
     }
     else if (seq > expected)
     {
+        // Store out-of-sequence packets up to a certain bound
+        if (q->m_outOfSeqPackets.size() < m_max_out_of_seq)
+        {
+            if (q->m_outOfSeqPackets.find(seq) == q->m_outOfSeqPackets.end())
+            {
+                q->m_outOfSeqPackets[seq] = size;
+                return 0;
+            }
+            else
+            {
+                // duplicate
+                return 3;
+            }
+        }
         // Generate NACK
         if (Simulator::Now() >= q->m_nackTimer || q->m_lastNACK != expected)
         {

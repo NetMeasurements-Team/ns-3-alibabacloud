@@ -118,6 +118,8 @@ class RdmaQueuePair : public Object
         uint64_t m_size;
         uint64_t m_startSeq;
         uint64_t m_cur_id;
+        /** prevents triggering SendComplete callback multiple times in case of retransmissions */
+        bool m_sent = false;
         Callback<void> m_notifyAppFinish;
         Callback<void> m_notifyAppSent;
     };
@@ -151,6 +153,7 @@ class RdmaRxQueuePair : public Object
     uint64_t m_tag;
     uint16_t m_ipid;
     uint64_t ReceiverNextExpectedSeq;
+    std::map<uint32_t, size_t> m_outOfSeqPackets;
     Time m_nackTimer;
     int32_t m_milestone_rx;
     uint32_t m_lastNACK;

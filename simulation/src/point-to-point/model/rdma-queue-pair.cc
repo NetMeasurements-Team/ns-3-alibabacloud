@@ -281,7 +281,7 @@ RdmaQueuePair::IsCurMessageFinished()
 {
     if (m_messages.empty())
     {
-        return true;
+        return false;
     }
     return snd_una >= m_messages.front().m_size + m_messages.front().m_startSeq;
 }
