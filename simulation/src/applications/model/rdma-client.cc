@@ -89,11 +89,6 @@ RdmaClient::GetTypeId(void)
                                           UintegerValue(0),
                                           MakeUintegerAccessor(&RdmaClient::m_baseRtt),
                                           MakeUintegerChecker<uint64_t>())
-                            .AddAttribute("Tag",
-                                          "Tag",
-                                          UintegerValue(0),
-                                          MakeUintegerAccessor(&RdmaClient::tag),
-                                          MakeUintegerChecker<uint64_t>())
                             .AddAttribute("Src",
                                           "Src",
                                           UintegerValue(0),
@@ -207,7 +202,6 @@ RdmaClient::StartApplication(void)
     }
     m_qp = rdma->AddQueuePair(src,
                               dest,
-                              tag,
                               m_size,
                               m_pg,
                               m_sip,
@@ -221,10 +215,9 @@ RdmaClient::StartApplication(void)
     Ptr<Node> other = NodeList::GetNode(m_qp->m_dest);
     Ptr<RdmaDriver> peer_rdma = other->GetObject<RdmaDriver>();
     m_rxQp = peer_rdma->AddRxQueuePair(m_dip.Get(), m_sip.Get(), m_dport, m_sport, m_pg);
-    m_rxQp->SetTag(m_qp->m_tag);
     if (m_size > 0)
     {
-        m_rxQp->PushMessage(m_size, 0);
+        m_rxQp->PushMessage(m_size, 0, 0);
     }
 }
 
@@ -236,13 +229,14 @@ RdmaClient::StopApplication()
 }
 
 void
-RdmaClient::PushMessageToQp(uint64_t size, uint64_t curr_flow_num)
+RdmaClient::PushMessageToQp(uint64_t size, uint64_t flow_id, uint64_t tag)
 {
     m_qp->PushMessage(size,
-                      curr_flow_num,
+                      flow_id,
+                      tag,
                       MakeCallback(&RdmaClient::Finish, this),
                       MakeCallback(&RdmaClient::Sent, this));
-    m_rxQp->PushMessage(size, curr_flow_num);
+    m_rxQp->PushMessage(size, flow_id, tag);
 
     Ptr<RdmaDriver> rdma = GetNode()->GetObject<RdmaDriver>();
     Ptr<QbbNetDevice> nic = rdma->m_rdma->GetNicOfQp(m_qp);

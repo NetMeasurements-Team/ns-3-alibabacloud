@@ -41,7 +41,6 @@ RdmaQueuePair::RdmaQueuePair(uint16_t pg,
     dport = _dport;
     m_src = -1;
     m_dest = -1;
-    m_tag = -1;
     snd_nxt = snd_una = 0;
     m_pg = pg;
     m_ipid = 0;
@@ -78,17 +77,6 @@ RdmaQueuePair::GetDest()
     return m_dest;
 }
 
-void
-RdmaQueuePair::SetTag(uint64_t tag)
-{
-    m_tag = tag;
-}
-
-uint64_t
-RdmaQueuePair::GetTag()
-{
-    return m_tag;
-}
 void
 RdmaQueuePair::SetWin(uint32_t win)
 {
@@ -139,12 +127,14 @@ RdmaQueuePair::GetBytesLeft()
 void
 RdmaRxQueuePair::PushMessage(
     uint64_t size,
-    uint64_t curr_flow_num)
+    uint64_t flow_id,
+    uint64_t tag)
 {
     // TODO does this need to be guarded?
     RdmaMessage msg;
     msg.m_size = size;
-    msg.m_cur_id = curr_flow_num;
+    msg.m_flow_id = flow_id;
+    msg.m_tag = tag;
     if (m_messages.empty())
     {
         msg.m_startSeq = ReceiverNextExpectedSeq;
@@ -235,13 +225,15 @@ RdmaQueuePair::UpdateRate()
 
 void
 RdmaQueuePair::PushMessage(uint64_t size,
-                           uint64_t curr_flow_num,
+                           uint64_t flow_id,
+                           uint64_t tag,
                            Callback<void> notifyAppFinish,
                            Callback<void> notifyAppSent)
 {
     RdmaMessage msg;
     msg.m_size = size;
-    msg.m_cur_id = curr_flow_num;
+    msg.m_flow_id = flow_id;
+    msg.m_tag = tag;
     if (m_messages.empty())
     {
         // there are no old messages in the queue, so set start_seq to snd_nxt
@@ -264,7 +256,7 @@ RdmaQueuePair::FinishMessage()
 {
     if (!m_messages.empty())
     {
-        RdmaMessage msg = m_messages.front();
+        const RdmaMessage& msg = m_messages.front();
         m_messages.pop();
         msg.m_notifyAppFinish();
 
@@ -308,12 +300,6 @@ RdmaRxQueuePair::RdmaRxQueuePair()
     m_nackTimer = Time(0);
     m_milestone_rx = 0;
     m_lastNACK = 0;
-}
-
-void
-RdmaRxQueuePair::SetTag(uint64_t tag)
-{
-    m_tag = tag;
 }
 
 uint32_t

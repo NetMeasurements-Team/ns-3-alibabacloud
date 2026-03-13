@@ -92,7 +92,6 @@ RdmaDriver::SetRdmaHw(Ptr<RdmaHw> rdma)
 Ptr<RdmaQueuePair>
 RdmaDriver::AddQueuePair(uint32_t src,
                          uint32_t dest,
-                         uint64_t tag,
                          uint64_t size,
                          uint16_t pg,
                          Ipv4Address sip,
@@ -106,7 +105,6 @@ RdmaDriver::AddQueuePair(uint32_t src,
 {
     return m_rdma->AddQueuePair(src,
                                 dest,
-                                tag,
                                 size,
                                 pg,
                                 sip,
@@ -144,19 +142,18 @@ RdmaDriver::QpComplete(Ptr<RdmaQueuePair> q)
 }
 
 void
-RdmaDriver::SendComplete(Ptr<RdmaQueuePair> q, uint64_t size, uint64_t curr_flow_id)
-{
-    m_traceSendComplete(q, size, curr_flow_id);
-}
-
-void RdmaDriver::RecvComplete(Ptr<RdmaRxQueuePair> q, uint64_t size, uint64_t curr_flow_id) {
-    m_traceRecvComplete(q, size, curr_flow_id);
+RdmaDriver::SendComplete(Ptr<RdmaQueuePair> q, const RdmaQueuePair::RdmaMessage& msg) {
+    m_traceSendComplete(q, msg);
 }
 
 void
-RdmaDriver::MessageComplete(Ptr<RdmaQueuePair> q, uint64_t size, uint64_t curr_flow_id)
-{
-    m_traceMessageComplete(q, size, curr_flow_id);
+RdmaDriver::RecvComplete(Ptr<RdmaRxQueuePair> q, const RdmaRxQueuePair::RdmaMessage& msg) {
+    m_traceRecvComplete(q, msg);
+}
+
+void
+RdmaDriver::MessageComplete(Ptr<RdmaQueuePair> q, const RdmaQueuePair::RdmaMessage& msg) {
+    m_traceMessageComplete(q, msg);
 }
 
 Ptr<RdmaRxQueuePair>

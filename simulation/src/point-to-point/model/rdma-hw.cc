@@ -240,7 +240,6 @@ RdmaHw::GetQp(uint32_t dip, uint16_t sport, uint16_t pg)
 Ptr<RdmaQueuePair>
 RdmaHw::AddQueuePair(uint32_t src,
                      uint32_t dest,
-                     uint64_t tag,
                      uint64_t size,
                      uint16_t pg,
                      Ipv4Address sip,
@@ -256,7 +255,6 @@ RdmaHw::AddQueuePair(uint32_t src,
     Ptr<RdmaQueuePair> qp = CreateObject<RdmaQueuePair>(pg, sip, dip, sport, dport);
     qp->SetSrc(src);
     qp->SetDest(dest);
-    qp->SetTag(tag);
     qp->SetWin(win);
     qp->SetBaseRtt(baseRtt);
     qp->SetVarWin(m_var_win);
@@ -264,7 +262,7 @@ RdmaHw::AddQueuePair(uint32_t src,
     qp->SetAppSentCallback(notifyAppSent);
 
     if (size != 0) {
-        qp->PushMessage(size, 0, notifyAppFinish, notifyAppSent);
+        qp->PushMessage(size, 0, 0, notifyAppFinish, notifyAppSent);
     }
 
     // add qp
@@ -523,7 +521,7 @@ RdmaHw::SendComplete(Ptr<RdmaQueuePair> qp)
     if (!msg.m_sent)
     {
         msg.m_sent = true;
-        m_sendCompleteCallback(qp, msg.m_size, msg.m_cur_id);
+        m_sendCompleteCallback(qp, msg);
     }
 }
 
@@ -898,9 +896,9 @@ RdmaHw::RecvComplete(Ptr<RdmaRxQueuePair> rxQp)
     // callback
     if (!m_recvCompleteCallback.IsNull())
     {
-        RdmaRxQueuePair::RdmaMessage msg = rxQp->m_messages.front();
+        const RdmaRxQueuePair::RdmaMessage msg = rxQp->m_messages.front();
         rxQp->m_messages.pop();
-        m_recvCompleteCallback(rxQp, msg.m_size, msg.m_cur_id);
+        m_recvCompleteCallback(rxQp, msg);
     }
 }
 
@@ -909,12 +907,12 @@ RdmaHw::QpCompleteMessage(Ptr<RdmaQueuePair> qp)
 {
     // qp->m_messages.front().m_notifyAppFinish();
     // callback
-    RdmaQueuePair::RdmaMessage msg = qp->m_messages.front();
+    const RdmaQueuePair::RdmaMessage msg = qp->m_messages.front();
     qp->FinishMessage();
 
     if (!m_messageCompleteCallback.IsNull())
     {
-        m_messageCompleteCallback(qp, msg.m_size, msg.m_cur_id);
+        m_messageCompleteCallback(qp, msg);
     }
     if (!qp->m_messages.empty())
     {

@@ -22,7 +22,6 @@ class RdmaQueuePair : public Object
     Time startTime;
     Ipv4Address sip, dip;
     uint16_t sport, dport;
-    uint64_t m_tag;
     uint32_t m_src, m_dest;
     uint64_t snd_nxt, snd_una; // next seq to send, the highest unacked seq
     uint16_t m_pg;
@@ -61,8 +60,6 @@ class RdmaQueuePair : public Object
     uint64_t GetBytesLeft();
     uint32_t GetSrc();
     uint32_t GetDest();
-    uint64_t GetTag();
-    void SetTag(uint64_t tag);
     void SetSrc(uint32_t src);
     void SetDest(uint32_t dest);
     uint32_t GetHash(void);
@@ -117,7 +114,8 @@ class RdmaQueuePair : public Object
     public:
         uint64_t m_size;
         uint64_t m_startSeq;
-        uint64_t m_cur_id;
+        uint64_t m_flow_id;
+        uint64_t m_tag;
         /** prevents triggering SendComplete callback multiple times in case of retransmissions */
         bool m_sent = false;
         Callback<void> m_notifyAppFinish;
@@ -126,7 +124,11 @@ class RdmaQueuePair : public Object
     std::queue<RdmaMessage> m_messages;
     std::mutex m_mutex;
     Time m_lastMessageStartTime;
-    void PushMessage(uint64_t size, uint64_t m_cur_id, Callback<void> notifyAppFinish, Callback<void> notifyAppSent);
+    void PushMessage(uint64_t size,
+                     uint64_t flow_id,
+                     uint64_t tag,
+                     Callback<void> notifyAppFinish,
+                     Callback<void> notifyAppSent);
     void FinishMessage();
     bool IsCurMessageFinished();
 };
@@ -150,7 +152,6 @@ class RdmaRxQueuePair : public Object
     ECNAccount m_ecn_source;
     uint32_t sip, dip;
     uint16_t sport, dport;
-    uint64_t m_tag;
     uint16_t m_ipid;
     uint64_t ReceiverNextExpectedSeq;
     std::map<uint32_t, size_t> m_outOfSeqPackets;
@@ -163,14 +164,15 @@ class RdmaRxQueuePair : public Object
     public:
         uint64_t m_size;
         uint64_t m_startSeq;
-        uint64_t m_cur_id;
+        uint64_t m_flow_id;
+        uint64_t m_tag;
     };
     std::queue<RdmaMessage> m_messages;
 
     static TypeId GetTypeId(void);
     RdmaRxQueuePair();
     void SetTag(uint64_t tag);
-    void PushMessage(uint64_t size, uint64_t curr_flow_num);
+    void PushMessage(uint64_t size, uint64_t flow_id, uint64_t tag);
     uint32_t GetHash(void);
 };
 

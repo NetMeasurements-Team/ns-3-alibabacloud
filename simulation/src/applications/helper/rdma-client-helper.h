@@ -58,7 +58,6 @@ class RdmaClientHelper
                      uint64_t baseRtt,
                      void (*msg_handler)(void* fun_arg),
                      void* fun_arg,
-                     int tag,
                      int src,
                      int dest,
                      bool passiveDestroy=true);

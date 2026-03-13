@@ -21,9 +21,9 @@ class RdmaDriver : public Object
 
     // trace
     TracedCallback<Ptr<RdmaQueuePair>> m_traceQpComplete;
-    TracedCallback<Ptr<RdmaQueuePair>, uint64_t, uint64_t> m_traceSendComplete;
-    TracedCallback<Ptr<RdmaRxQueuePair>, uint64_t, uint64_t> m_traceRecvComplete;
-    TracedCallback<Ptr<RdmaQueuePair>, uint64_t, uint64_t> m_traceMessageComplete;
+    TracedCallback<Ptr<RdmaQueuePair>, const RdmaQueuePair::RdmaMessage&> m_traceSendComplete;
+    TracedCallback<Ptr<RdmaRxQueuePair>, const RdmaRxQueuePair::RdmaMessage&> m_traceRecvComplete;
+    TracedCallback<Ptr<RdmaQueuePair>, const RdmaQueuePair::RdmaMessage&> m_traceMessageComplete;
 
     static TypeId GetTypeId(void);
     RdmaDriver();
@@ -41,7 +41,6 @@ class RdmaDriver : public Object
     // add a queue pair
     Ptr<RdmaQueuePair> AddQueuePair(uint32_t src,
                                     uint32_t dest,
-                                    uint64_t tag,
                                     uint64_t size,
                                     uint16_t pg,
                                     Ipv4Address _sip,
@@ -65,9 +64,9 @@ class RdmaDriver : public Object
 
     // callback when qp completes
     void QpComplete(Ptr<RdmaQueuePair> q);
-    void SendComplete(Ptr<RdmaQueuePair> q, uint64_t size, uint64_t curr_flow_id);
-    void RecvComplete(Ptr<RdmaRxQueuePair> q, uint64_t size, uint64_t curr_flow_id);
-    void MessageComplete(Ptr<RdmaQueuePair> q, uint64_t size, uint64_t curr_flow_id);
+    void SendComplete(Ptr<RdmaQueuePair> q, const RdmaQueuePair::RdmaMessage& msg);
+    void RecvComplete(Ptr<RdmaRxQueuePair> q, const RdmaRxQueuePair::RdmaMessage& msg);
+    void MessageComplete(Ptr<RdmaQueuePair> q, const RdmaQueuePair::RdmaMessage& msg);
 };
 
 } // namespace ns3

@@ -41,7 +41,6 @@ RdmaClientHelper::RdmaClientHelper(uint16_t pg,
                                    uint64_t baseRtt,
                                    void (*msg_handler)(void* fun_arg),
                                    void* fun_arg,
-                                   int tag,
                                    int src,
                                    int dest,
                                    bool passiveDestroy)
@@ -55,7 +54,6 @@ RdmaClientHelper::RdmaClientHelper(uint16_t pg,
     SetAttribute("WriteSize", UintegerValue(size));
     SetAttribute("Window", UintegerValue(win));
     SetAttribute("BaseRtt", UintegerValue(baseRtt));
-    SetAttribute("Tag", UintegerValue(tag));
     SetAttribute("Src", UintegerValue(src));
     SetAttribute("Dest", UintegerValue(dest));
     SetAttribute("NVLS_enable", UintegerValue(0));

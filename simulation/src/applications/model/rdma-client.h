@@ -76,7 +76,7 @@ class RdmaClient : public Application
     /**
      * \brief push a message to be sent on the associated qp
      */
-    void PushMessageToQp(uint64_t size, uint64_t curr_flow_num);
+    void PushMessageToQp(uint64_t size, uint64_t flow_id, uint64_t tag);
     /**
      * \brief terminate the associated qp
      */
@@ -102,7 +102,6 @@ class RdmaClient : public Application
     uint64_t m_baseRtt; // base Rtt
     void (*msg_handler)(void* fun_arg);
     void* fun_arg;
-    uint64_t tag;
     uint64_t src;
     uint64_t dest;
     uint32_t nvls_enable;

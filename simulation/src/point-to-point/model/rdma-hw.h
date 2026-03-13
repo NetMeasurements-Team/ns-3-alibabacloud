@@ -80,13 +80,16 @@ class RdmaHw : public Object
     typedef Callback<void, Ptr<RdmaQueuePair>> QpCompleteCallback;
     QpCompleteCallback m_qpCompleteCallback;
     // callback triggered when the src sends the last packet of a message
-    typedef Callback<void, Ptr<RdmaQueuePair>, uint64_t, uint64_t> SendCompleteCallback;
+    typedef Callback<void, Ptr<RdmaQueuePair>, const RdmaQueuePair::RdmaMessage&>
+        SendCompleteCallback;
     SendCompleteCallback m_sendCompleteCallback;
     // callback triggered when the dst sends the ack to the last packet of a message
-    typedef Callback<void, Ptr<RdmaRxQueuePair>, uint64_t, uint64_t> RecvCompleteCallback;
+    typedef Callback<void, Ptr<RdmaRxQueuePair>, const RdmaRxQueuePair::RdmaMessage&>
+        RecvCompleteCallback;
     RecvCompleteCallback m_recvCompleteCallback;
     // callback triggered when the src receives the ack to the last packet of a message
-    typedef Callback<void, Ptr<RdmaQueuePair>, uint64_t, uint64_t> MessageCompleteCallback;
+    typedef Callback<void, Ptr<RdmaQueuePair>, const RdmaQueuePair::RdmaMessage&>
+        MessageCompleteCallback;
     MessageCompleteCallback m_messageCompleteCallback;
 
     // for monitor
@@ -140,7 +143,6 @@ class RdmaHw : public Object
     }
     Ptr<RdmaQueuePair> AddQueuePair(uint32_t src,
                                     uint32_t dest,
-                                    uint64_t tag,
                                     uint64_t size,
                                     uint16_t pg,
                                     Ipv4Address _sip,
