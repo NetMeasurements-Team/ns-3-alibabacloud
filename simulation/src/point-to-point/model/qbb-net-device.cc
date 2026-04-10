@@ -418,34 +418,29 @@ QbbNetDevice::DequeueAndTransmit(void)
         else
         { // no packet to send
             NS_LOG_INFO("PAUSE prohibits send at node " << m_node->GetId());
-            //Time t = Simulator::GetMaximumSimulationTime();
+            Time t = Simulator::GetMaximumSimulationTime();
             uint32_t fcount = m_rdmaEQ->m_qpGrp->m_qps.size();
             for (uint32_t i = 0; i < fcount; i++)
             {
                 Ptr<RdmaQueuePair> qp = m_rdmaEQ->m_qpGrp->m_qps[i];
+                if (qp->GetBytesLeft() == 0)
+                    continue;
                 qp->UpdateRate();
-                // if (m_rdmaEQ->m_txDequeueMode == RdmaEgressQueue::TxDequeueMode::QP_AVAIL)
-                // {
-                //     t = Min(qp->m_nextAvail, t);
-                // }
-                // else if (m_rdmaEQ->m_txDequeueMode == RdmaEgressQueue::TxDequeueMode::DWRR)
-                // {
-                //     Time newt = qp->m_rate.CalculateBytesTxTime(
-                //         (int64_t)m_rdmaEQ->m_token_per_round - qp->m_tokenBucket.m_tokens);
-                //     newt = newt.GetTimeStep() == 0 ? NanoSeconds(1) : newt;
-                //     t = Min(newt + Simulator::Now(), t);
-                // }
+                if (m_rdmaEQ->m_txDequeueMode == RdmaEgressQueue::TxDequeueMode::QP_AVAIL) {
+                    t = Min(qp->m_nextAvail, t);
+                } else if (m_rdmaEQ->m_txDequeueMode == RdmaEgressQueue::TxDequeueMode::DWRR) {
+                    Time newt = qp->m_rate.CalculateBytesTxTime(
+                        (int64_t)m_rdmaEQ->m_token_per_round - qp->m_tokenBucket.m_tokens);
+                    newt = newt.GetTimeStep() == 0 ? NanoSeconds(1) : newt;
+                    t = Min(newt + Simulator::Now(), t);
+                }
             }
 #ifdef NS3_MTP
             cs.ExitSection();
 #endif
-            // if (m_nextSend.IsExpired() && t < Simulator::GetMaximumSimulationTime()
-            //     && t > Simulator::Now())
-            // {
-            //     m_nextSend = Simulator::Schedule(t - Simulator::Now(),
-            //                                      &QbbNetDevice::DequeueAndTransmit,
-            //                                      this);
-            // }
+            if (m_nextSend.IsExpired() && t < Simulator::GetMaximumSimulationTime() && t > Simulator::Now()){
+                m_nextSend = Simulator::Schedule(t - Simulator::Now(), &QbbNetDevice::DequeueAndTransmit, this);
+            }
         }
         return;
     }
@@ -483,16 +478,18 @@ QbbNetDevice::DequeueAndTransmit(void)
         else
         { // No queue can deliver any packet
             NS_LOG_INFO("PAUSE prohibits send at node " << m_node->GetId());
-            // if (m_node->GetNodeType() == 0 && m_qcnEnabled){ //nothing to send, possibly due to qcn flow control, if so reschedule sending
-            // 	Time t = Simulator::GetMaximumSimulationTime();
-            // 	for (uint32_t i = 0; i < m_rdmaEQ->GetFlowCount(); i++){
-            // 		Ptr<RdmaQueuePair> qp = m_rdmaEQ->GetQp(i);
-            // 		t = Min(qp->m_nextAvail, t);
-            // 	}
-            // 	if (m_nextSend.IsExpired() && t < Simulator::GetMaximumSimulationTime() && t > Simulator::Now()){
-            // 		m_nextSend = Simulator::Schedule(t - Simulator::Now(), &QbbNetDevice::DequeueAndTransmit, this);
-            // 	}
-            // }
+            if (m_node->GetNodeType() == 0 && m_qcnEnabled){ //nothing to send, possibly due to qcn flow control, if so reschedule sending
+                Time t = Simulator::GetMaximumSimulationTime();
+                for (uint32_t i = 0; i < m_rdmaEQ->GetFlowCount(); i++){
+                    Ptr<RdmaQueuePair> qp = m_rdmaEQ->GetQp(i);
+                    if (qp->GetBytesLeft() == 0)
+                        continue;
+                    t = Min(qp->m_nextAvail, t);
+                }
+                if (m_nextSend.IsExpired() && t < Simulator::GetMaximumSimulationTime() && t > Simulator::Now()){
+                    m_nextSend = Simulator::Schedule(t - Simulator::Now(), &QbbNetDevice::DequeueAndTransmit, this);
+                }
+            }
         }
     }
 #ifdef NS3_MTP
@@ -642,6 +639,8 @@ QbbNetDevice::SwitchDequeueAndTransmit(void)
             for (uint32_t i = 0; i < m_rdmaEQ->GetFlowCount(); i++)
             {
                 Ptr<RdmaQueuePair> qp = m_rdmaEQ->GetQp(i);
+                if (qp->GetBytesLeft() == 0)
+                    continue;
                 t = Min(qp->m_nextAvail, t);
             }
             if (m_nextSend.IsExpired() && t < Simulator::GetMaximumSimulationTime() &&
@@ -850,14 +849,14 @@ QbbNetDevice::TransmitStart(Ptr<Packet> p)
         // std::cout<<" net: "<<this<<" QPindex: "<<qIndex<<" GetBytesLeft
         // "<<lastQp->GetBytesLeft()<<" p->GetSize() "<<p->GetSize()<<std::endl; std::cout<<" net:
         // "<<this<<" p->GetSize() "<<p->GetSize()<<std::endl; if(9000>=lastQp->GetBytesLeft()){
-        if (/*p->GetSize()<9000&&*/ p->GetSize() > 60)
+        CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
+        ch.getInt = 1; // parse INT header
+        p->PeekHeader(ch);
+        //if (/*p->GetSize()<9000&&*/ p->GetSize() > 60)
+        if (ch.l3Prot == 0x11)
         { // 增加判断当前packet是否是ack报文的逻辑。
             // if(lastQp->IsFinished()){s
             // Simulator::Schedule(txTime,&sendfinsh,this);
-            CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header |
-                            CustomHeader::L4_Header);
-            // ch.getInt = 1; // parse INT header
-            p->PeekHeader(ch);
             // std::cout<<" p->GetSize()>=lastQp->GetBytesLeft() "<<std::endl;
             Simulator::Schedule(txTime, &QbbNetDevice::SendCallback, this, p);
         }
@@ -903,14 +902,14 @@ QbbNetDevice::SwitchAsHostTransmitStart(Ptr<Packet> p)
         // std::cout<<" net: "<<this<<" QPindex: "<<qIndex<<" GetBytesLeft
         // "<<lastQp->GetBytesLeft()<<" p->GetSize() "<<p->GetSize()<<std::endl; std::cout<<" net:
         // "<<this<<" p->GetSize() "<<p->GetSize()<<std::endl; if(9000>=lastQp->GetBytesLeft()){
-        if (/*p->GetSize()<9000&&*/ p->GetSize() > 60)
+        //if (/*p->GetSize()<9000&&*/ p->GetSize() > 60)
+        CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
+        ch.getInt = 1; // parse INT header
+        p->PeekHeader(ch);
+        if (ch.l3Prot == 0x11)
         { // 增加判断当前packet是否是ack报文的逻辑。
             // if(lastQp->IsFinished()){s
             // Simulator::Schedule(txTime,&sendfinsh,this);
-            CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header |
-                            CustomHeader::L4_Header);
-            // ch.getInt = 1; // parse INT header
-            p->PeekHeader(ch);
             // std::cout<<" p->GetSize()>=lastQp->GetBytesLeft() "<<std::endl;
             Simulator::Schedule(txTime, &QbbNetDevice::SendCallback, this, p);
         }
