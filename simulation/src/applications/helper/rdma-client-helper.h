@@ -56,6 +56,7 @@ class RdmaClientHelper
                      uint64_t size,
                      uint32_t win,
                      uint64_t baseRtt,
+                     bool tolerate_ooo,
                      void (*msg_handler)(void* fun_arg),
                      void* fun_arg,
                      int src,

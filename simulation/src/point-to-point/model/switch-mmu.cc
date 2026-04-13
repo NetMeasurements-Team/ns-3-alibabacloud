@@ -39,6 +39,7 @@ namespace ns3 {
 			// for (uint32_t i = 1; i < 64; i++)
 			// 	printf("(%u,%u)", hdrm_bytes[i][3], ingress_bytes[i][3]);
 			// printf("\n");
+		    std::cout << "node " << node_id << ": dropping lossless packet (port" << port <<", qIndex "<< qIndex <<") at ingress admission headroom " << hdrm_bytes[port][qIndex] << " of " << headroom[port] << " pktSize " << psize << " shared used " << GetSharedUsed(port, qIndex) << " threshold " << GetPfcThreshold(port) << std::endl;
 			return false;
 		}
 		return true;

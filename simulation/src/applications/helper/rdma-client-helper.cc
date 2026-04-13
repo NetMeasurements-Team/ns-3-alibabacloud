@@ -39,6 +39,7 @@ RdmaClientHelper::RdmaClientHelper(uint16_t pg,
                                    uint64_t size,
                                    uint32_t win,
                                    uint64_t baseRtt,
+                                   bool tolerate_ooo,
                                    void (*msg_handler)(void* fun_arg),
                                    void* fun_arg,
                                    int src,
@@ -54,6 +55,7 @@ RdmaClientHelper::RdmaClientHelper(uint16_t pg,
     SetAttribute("WriteSize", UintegerValue(size));
     SetAttribute("Window", UintegerValue(win));
     SetAttribute("BaseRtt", UintegerValue(baseRtt));
+    SetAttribute("TolerateOutOfOrder", BooleanValue(tolerate_ooo));
     SetAttribute("Src", UintegerValue(src));
     SetAttribute("Dest", UintegerValue(dest));
     SetAttribute("NVLS_enable", UintegerValue(0));

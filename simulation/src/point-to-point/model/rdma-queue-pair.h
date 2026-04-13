@@ -41,6 +41,7 @@ class RdmaQueuePair : public Object
     uint32_t nvls_enable;
     DataRate m_rate; //< Current rate
     Ptr<RdmaCongestionOps> m_congestionControl;
+    EventId m_rtoEvent;
 
     /***********
      * methods
@@ -63,7 +64,7 @@ class RdmaQueuePair : public Object
     void SetSrc(uint32_t src);
     void SetDest(uint32_t dest);
     uint32_t GetHash(void);
-    void Acknowledge(uint64_t ack);
+    bool Acknowledge(uint64_t ack);
     uint64_t GetOnTheFly();
     bool IsWinBound();
     /**
@@ -153,6 +154,8 @@ class RdmaRxQueuePair : public Object
     uint32_t sip, dip;
     uint16_t sport, dport;
     uint16_t m_ipid;
+    uint32_t m_win;
+    bool m_ooo;
     uint64_t ReceiverNextExpectedSeq;
     std::map<uint32_t, size_t> m_outOfSeqPackets;
     Time m_nackTimer;

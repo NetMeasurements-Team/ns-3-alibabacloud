@@ -108,6 +108,11 @@ RdmaClient::GetTypeId(void)
                                           "Destroy QPs when their message queue is empty",
                                           BooleanValue(false),
                                           MakeBooleanAccessor(&RdmaClient::m_passiveDestroy),
+                                          MakeBooleanChecker())
+                            .AddAttribute("TolerateOutOfOrder",
+                                          "Allow in-window out of order packets without triggering a NACK",
+                                          BooleanValue(false),
+                                          MakeBooleanAccessor(&RdmaClient::m_ooo),
                                           MakeBooleanChecker());
     return tid;
 }
@@ -215,6 +220,8 @@ RdmaClient::StartApplication(void)
     Ptr<Node> other = NodeList::GetNode(m_qp->m_dest);
     Ptr<RdmaDriver> peer_rdma = other->GetObject<RdmaDriver>();
     m_rxQp = peer_rdma->AddRxQueuePair(m_dip.Get(), m_sip.Get(), m_dport, m_sport, m_pg);
+    m_rxQp->m_win = m_win;
+    m_rxQp->m_ooo = m_ooo;
     if (m_size > 0)
     {
         m_rxQp->PushMessage(m_size, 0, 0);

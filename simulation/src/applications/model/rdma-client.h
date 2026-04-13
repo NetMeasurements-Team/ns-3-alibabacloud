@@ -109,6 +109,7 @@ class RdmaClient : public Application
      * \brief if true, the qp is destroyed immediately when the message queue is empty
      */
     bool m_passiveDestroy;
+    bool m_ooo;
 };
 
 } // namespace ns3

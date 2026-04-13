@@ -113,11 +113,11 @@ RdmaHw::GetTypeId(void)
                           TimeValue(MicroSeconds(4)),
                           MakeTimeAccessor(&RdmaHw::m_cnp_interval),
                           MakeTimeChecker())
-            .AddAttribute("MaxOutOfSeq",
-                          "Max number of out of sequence packets stored before a NACK",
-                          UintegerValue(0),
-                          MakeUintegerAccessor(&RdmaHw::m_max_out_of_seq),
-                          MakeUintegerChecker<size_t>());
+            .AddAttribute("EnableRto",
+                          "Enable Rto timer (experimental)",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&RdmaHw::m_enable_rto),
+                          MakeBooleanChecker());
     return tid;
 }
 
@@ -542,7 +542,7 @@ RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader& ch)
     rxQp->m_ecn_source.total++;
     rxQp->m_milestone_rx = m_ack_interval;
 
-    int x = ReceiverCheckSeq(ch.udp.seq, rxQp, payload_size);
+    const int x = ReceiverCheckSeq(ch.udp.seq, rxQp, payload_size, false);
     if (x == 1 || x == 2)
     { // generate ACK or NACK
         qbbHeader seqh;
@@ -689,12 +689,18 @@ RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader& ch)
     {
         if (!m_backto0)
         {
-            qp->Acknowledge(seq);
+            if (qp->Acknowledge(seq))
+            {
+                InitRto(qp);
+            }
         }
         else
         {
             uint64_t goback_seq = seq / m_chunk * m_chunk;
-            qp->Acknowledge(goback_seq);
+            if (qp->Acknowledge(goback_seq))
+            {
+                InitRto(qp);
+            }
         }
         if (qp->IsCurMessageFinished())
         {
@@ -708,6 +714,7 @@ RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader& ch)
     }
     if (ch.l3Prot == 0xFD) // NACK
     {
+        //printf("SEND received NACK for flow %lu (win %u, q->m->len %lu, snd_una %lu, snd_nxt %lu) at %lu\n", qp->m_messages.front().m_flow_id, qp->m_win, qp->m_messages.size(), qp->snd_una, qp->snd_nxt, Simulator::Now().GetTimeStep());
         // restart from the last unacknowledged sequence
         RecoverQueue(qp);
     }
@@ -759,7 +766,7 @@ RdmaHw::Receive(Ptr<Packet> p, CustomHeader& ch)
 }
 
 int
-RdmaHw::ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size)
+RdmaHw::ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size, bool ooo_recursion)
 {
     uint64_t expected = q->ReceiverNextExpectedSeq;
     if (seq == expected)
@@ -767,16 +774,21 @@ RdmaHw::ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size)
         q->ReceiverNextExpectedSeq = expected + size;
 
         // handle any previously received out of sequence packets
+        bool ooo_ack = false;
         while (!q->m_outOfSeqPackets.empty())
         {
             const auto nxt = q->m_outOfSeqPackets.begin();
             uint64_t ooo_seq  = nxt->first;
             uint32_t ooo_size = nxt->second;
             q->m_outOfSeqPackets.erase(nxt);
-            if (const int ret = ReceiverCheckSeq(ooo_seq, q, ooo_size); ret != 1 && ret != 5)
+            if (const int ret = ReceiverCheckSeq(ooo_seq, q, ooo_size, true); ret != 1 && ret != 5)
             {
                 q->m_outOfSeqPackets[ooo_seq] = ooo_size;
                 break;
+            }
+            else if (ret == 1)
+            {
+                ooo_ack = true;
             }
         }
 
@@ -785,7 +797,7 @@ RdmaHw::ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size)
             q->m_milestone_rx += m_ack_interval;
             return 1; // Generate ACK
         }
-        else if (q->ReceiverNextExpectedSeq % m_chunk == 0)
+        else if (ooo_ack || q->ReceiverNextExpectedSeq % m_chunk == 0)
         {
             return 1;
         }
@@ -794,10 +806,15 @@ RdmaHw::ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size)
             return 5;
         }
     }
+    else if (ooo_recursion)
+    {
+        return 0;
+    }
     else if (seq > expected)
     {
         // Store out-of-sequence packets up to a certain bound
-        if (q->m_outOfSeqPackets.size() < m_max_out_of_seq)
+        // FIXME m_win might be variable, find a better way to cap m_outOfSeqPackets
+        if (q->m_ooo && q->m_outOfSeqPackets.size() < q->m_win / m_mtu + 2)
         {
             if (q->m_outOfSeqPackets.find(seq) == q->m_outOfSeqPackets.end())
             {
@@ -810,9 +827,11 @@ RdmaHw::ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size)
                 return 3;
             }
         }
+        //printf("RECV out of order and window for flow %lu (win %u, ooo.size %lu, ooo min %u, ooo max %u, q->m->len %lu, seq %lu, expected %lu) at %lu\n", q->m_messages.front().m_flow_id, q->m_win, q->m_outOfSeqPackets.size(), q->m_outOfSeqPackets.begin()->first, q->m_outOfSeqPackets.rbegin()->first, q->m_messages.size(), seq, expected, Simulator::Now().GetTimeStep());
         // Generate NACK
         if (Simulator::Now() >= q->m_nackTimer || q->m_lastNACK != expected)
         {
+            //printf("NACK %lu\n", q->m_messages.front().m_flow_id);
             q->m_nackTimer = Simulator::Now() + MicroSeconds(m_nack_interval);
             q->m_lastNACK = expected;
             if (m_backto0)
@@ -860,11 +879,16 @@ void
 RdmaHw::RecoverQueue(Ptr<RdmaQueuePair> qp)
 {
     qp->snd_nxt = qp->snd_una;
+    InitRto(qp);
 }
 
 void
 RdmaHw::QpComplete(Ptr<RdmaQueuePair> qp)
 {
+    if (m_enable_rto)
+    {
+        qp->m_rtoEvent.Cancel();
+    }
     NS_ASSERT(!m_qpCompleteCallback.IsNull());
 
     uint32_t nic_idx = GetNicIdxOfQp(qp);
@@ -994,10 +1018,41 @@ RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp)
     // std::endl;
     qp->m_ipid++;
 
+    // This will trigger retransmission in case the packet is not acknowledged in time
+    if (qp->m_rtoEvent.IsExpired())
+    {
+        InitRto(qp);
+    }
+
     // return
     return p;
 }
 
+void RdmaHw::InitRto(Ptr<RdmaQueuePair> qp)
+{
+    if (!m_enable_rto)
+    {
+        // if (qp->m_rtoEvent.IsRunning())
+        // {
+        qp->m_rtoEvent.Cancel();
+        // }
+        if (/*qp->GetBytesLeft() > 0 ||*/ qp->m_baseRtt > 0 && qp->snd_nxt > qp->snd_una)
+        {
+            // FIXME determine proper timeout value
+            qp->m_rtoEvent = Simulator::Schedule(NanoSeconds(30 * qp->m_baseRtt), &RdmaHw::RtoHandler, this, qp);
+        }
+    }
+}
+
+void RdmaHw::RtoHandler(Ptr<RdmaQueuePair> qp)
+{
+    if (qp->snd_nxt > qp->snd_una) {  // still have unacked data
+        //printf("RtoHandler RecoverQueue for %u -> %u, flow_id %lu, left %lu, snd_nxt %lu, snd_una %lu, %lu\n", qp->m_src, qp->m_dest, qp->m_messages.front().m_flow_id, qp->GetBytesLeft(), qp->snd_nxt, qp->snd_una, Simulator::Now().GetTimeStep());
+        RecoverQueue(qp);  // reset snd_nxt = snd_una
+        uint32_t nic_idx = GetNicIdxOfQp(qp);
+        m_nic[nic_idx].dev->TriggerTransmit();
+    }
+}
 
 Ptr<Packet> RdmaHw::GenDataPacket(Ptr<RdmaQueuePair> qp, uint32_t pkt_size)
 {

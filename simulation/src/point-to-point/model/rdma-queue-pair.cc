@@ -166,18 +166,28 @@ RdmaQueuePair::GetHash(void)
     return Hash32(buf.c, 12);
 }
 
-void
+bool
 RdmaQueuePair::Acknowledge(uint64_t ack)
 {
     if (ack > snd_una)
     {
         snd_una = ack;
+        if (snd_nxt < snd_una)
+        {
+            snd_nxt = snd_una;  // needed because of the Rto mechanism
+        }
+        return true;
     }
+    return false;
 }
 
 uint64_t
 RdmaQueuePair::GetOnTheFly()
 {
+    if (snd_nxt < snd_una)
+    {
+        printf("WARN flow %lu, snd_nxt %lu, snd_una %lu, at %lu\n", m_messages.front().m_flow_id, snd_nxt, snd_una, Simulator::Now().GetTimeStep());
+    }
     return snd_nxt - snd_una;
 }
 

@@ -187,9 +187,10 @@ class RdmaHw : public Object
     void PCIeResume(uint32_t nic_idx, uint32_t qIndex);
     void EnablePause();
     bool enable_pcie_pause;
+    bool m_enable_rto;
 
     void CheckandSendQCN(Ptr<RdmaRxQueuePair> q);
-    int ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size);
+    int ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size, bool ooo_recursion);
     void AddHeader(Ptr<Packet> p, uint16_t protocolNumber);
     static uint16_t EtherToPpp(uint16_t protocol);
 
@@ -218,6 +219,9 @@ class RdmaHw : public Object
     void PktSent(Ptr<RdmaQueuePair> qp, Ptr<Packet> pkt, Time interframeGap);
     void UpdateNextAvail(Ptr<RdmaQueuePair> qp, Time interframeGap, uint32_t pkt_size);
     void ChangeRate(Ptr<RdmaQueuePair> qp, DataRate new_rate);
+
+    void InitRto(Ptr<RdmaQueuePair> qp);
+    void RtoHandler(Ptr<RdmaQueuePair> qp);
 
     /******************************
      * Congestion control relevant
