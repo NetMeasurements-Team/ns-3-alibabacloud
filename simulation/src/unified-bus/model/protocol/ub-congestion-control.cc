@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "ns3/ub-congestion-control.h"
 #include "ns3/ub-caqm.h"
+#include "ns3/ub-dcqcn.h"
 #include "ns3/boolean.h"
 #include "ns3/enum.h"
 #include "ns3/ub-switch.h"
@@ -12,15 +13,16 @@ NS_OBJECT_ENSURE_REGISTERED(UbCongestionControl);
 
 GlobalValue g_congestionCtrlAlgo =
     GlobalValue("UB_CC_ALGO",
-                "Congestion control algorithm",
+                "Host/switch congestion control algorithm.",
                 EnumValue(CongestionCtrlAlgo::CAQM),
-                MakeEnumChecker (CongestionCtrlAlgo::CAQM, "CAQM",
-                                 CongestionCtrlAlgo::LDCP, "LDCP",
-                                 CongestionCtrlAlgo::DCQCN, "DCQCN"));
+                MakeEnumChecker(CongestionCtrlAlgo::CAQM,
+                                "CAQM",
+                                CongestionCtrlAlgo::DCQCN,
+                                "DCQCN"));
 
 GlobalValue g_congestionCtrlEnabled =
     GlobalValue("UB_CC_ENABLED",
-                "Congestion control enabled",
+                "Enable end-to-end congestion control on all transport channels.",
                 BooleanValue(false),
                 MakeBooleanChecker());
 
@@ -48,6 +50,15 @@ UbCongestionControl::~UbCongestionControl()
 {
 }
 
+void
+UbCongestionControl::OnSwitchAttached(Ptr<UbSwitch> sw)
+{
+    if (sw != nullptr)
+    {
+        sw->SetCongestionCtrl(this);
+    }
+}
+
 Ptr<UbCongestionControl> UbCongestionControl::Create(UbNodeType_t nodeType)
 {
     EnumValue val = EnumValue(0);
@@ -57,6 +68,10 @@ Ptr<UbCongestionControl> UbCongestionControl::Create(UbNodeType_t nodeType)
         return CreateObject<UbHostCaqm>();
     } else if (algo == CAQM && nodeType == UB_SWITCH) {
         return CreateObject<UbSwitchCaqm>();
+    } else if (algo == DCQCN && nodeType == UB_DEVICE) {
+        return CreateObject<UbHostDcqcn>();
+    } else if (algo == DCQCN && nodeType == UB_SWITCH) {
+        return CreateObject<UbSwitchDcqcn>();
     } else {
         // Other congestion control algorithms to be extended
         return nullptr;

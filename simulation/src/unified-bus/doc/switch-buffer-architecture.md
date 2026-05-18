@@ -64,8 +64,8 @@ m_outPortBuffer[2][1] -= packetSize;  // OutPort 视图减账
 **关键 API**：
 ```cpp
 bool CheckInPortSpace(uint32_t inPort, uint32_t priority, uint32_t pSize);
-uint64_t GetInPortBufferUsed(uint32_t inPort, uint32_t priority);
-uint64_t GetTotalInPortBufferUsed(uint32_t inPort);
+uint64_t GetQueueIngressNonHeadroomBytes(uint32_t inPort, uint32_t priority);
+uint64_t GetPortIngressNonHeadroomBytes(uint32_t inPort);
 ```
 
 #### OutPort 视图 (`m_outPortBuffer[outPort][priority]`)
@@ -345,12 +345,17 @@ void UbSwitch::ForwardDataPacket(uint32_t outPort, uint32_t priority, uint32_t i
 // 伪代码：PFC 暂停帧生成
 void CheckPfcCondition(uint32_t inPort, uint32_t priority)
 {
-    uint64_t bufferUsed = m_queueManager->GetInPortBufferUsed(inPort, priority);
-    uint64_t threshold = m_queueManager->GetBufferSizePerQueue() * 0.8;  // 80% 阈值
-    
-    if (bufferUsed > threshold) {
-        // 向上游发送 PFC 暂停帧
-        SendPfcPause(inPort, priority);
+    if (flowControlMode == PFC_FIXED) {
+        uint64_t ingressBytes = m_queueManager->GetQueueIngressTotalBytes(inPort, priority);
+        if (ingressBytes >= port->GetPfcUpThld()) {
+            SendPfcPause(inPort, priority);
+        }
+    } else if (flowControlMode == PFC_DYNAMIC) {
+        uint64_t hdrmUsed = m_queueManager->GetQueueIngressHeadroomBytes(inPort, priority);
+        uint64_t sharedUsed = m_queueManager->GetQueueIngressSharedBytes(inPort, priority);
+        if (hdrmUsed > 0 || sharedUsed >= m_queueManager->GetXoffThreshold()) {
+            SendPfcPause(inPort, priority);
+        }
     }
 }
 ```
@@ -375,7 +380,7 @@ void CheckPfcCondition(uint32_t inPort, uint32_t priority)
 | `CheckOutPortSpace()` | OutPort 视图检查 | bool（始终 true） | 统计监控 |
 | `PushToVoq()` | 包入队统计 | void | 更新双视图 |
 | `PopFromVoq()` | 包出队统计 | void | 更新双视图 |
-| `GetInPortBufferUsed()` | InPort 占用查询 | uint64_t | 流控决策 |
+| `GetQueueIngressNonHeadroomBytes()` | Queue ingress 非 headroom 占用查询 | uint64_t | 流控决策 |
 | `GetOutPortBufferUsed()` | OutPort 占用查询 | uint64_t | 路由负载均衡 |
 | `GetTotalOutPortBufferUsed()` | OutPort 总占用 | uint64_t | CAQM 拥塞控制 |
 

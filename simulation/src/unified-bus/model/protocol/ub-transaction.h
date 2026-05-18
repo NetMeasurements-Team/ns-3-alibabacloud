@@ -56,6 +56,7 @@ namespace ns3 {
         void ApplyScheduleWqeSegment(Ptr<UbTransportChannel> tp);
 
         bool ProcessWqeSegmentComplete(Ptr<UbWqeSegment> wqeSegment);
+        void HandleInboundTaUnit(uint32_t localTpn, Ptr<UbWqeSegment> segment);
 
         void TriggerTpTransmit(uint32_t jettyNum);
 
@@ -95,6 +96,16 @@ namespace ns3 {
 
         void OnScheduleWqeSegmentFinish(Ptr<UbWqeSegment> segment);
 
+        bool IsUrmaReadWriteRequest(const Ptr<UbWqeSegment>& segment);
+
+        void ValidateUrmaServiceModeOrDie(uint32_t jettyNum, const Ptr<UbWqeSegment>& segment);
+        Ptr<UbWqeSegment> ExecuteRemoteWriteAndBuildAck(uint32_t localTpn,
+                                                        Ptr<UbWqeSegment> request);
+        Ptr<UbWqeSegment> ExecuteRemoteReadAndBuildResponse(uint32_t localTpn,
+                                                            Ptr<UbWqeSegment> request);
+        void CompleteLocalRequestFromResponse(Ptr<UbWqeSegment> response);
+        uint64_t DeriveRemoteAddress(const Ptr<UbWqeSegment>& request) const;
+
         uint32_t m_nodeId;
 
         // Tpn和Tp的对应map
@@ -121,6 +132,7 @@ namespace ns3 {
         std::map<uint32_t, TransactionServiceMode> m_serviceMode;
         // 每个jetty存储wqe的id顺序
         std::map<uint32_t, std::vector<uint32_t>> m_jettyOrderedWqe;
+        std::map<std::pair<uint32_t, uint64_t>, uint32_t> m_memoryStore;
     };
 
 } // namespace ns3

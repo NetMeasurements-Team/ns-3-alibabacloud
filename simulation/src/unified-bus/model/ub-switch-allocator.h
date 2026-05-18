@@ -63,6 +63,7 @@ public:
 
 private:
     std::vector<std::vector<uint32_t> > m_rrIdx;
+    std::vector<std::vector<bool> > m_rrPhaseSeeded;
 };
 
 
@@ -90,6 +91,7 @@ public:
 
 private:
     std::vector<std::vector<uint32_t> > m_rrIdx;
+    std::vector<std::vector<bool> > m_rrPhaseSeeded;
     std::vector<std::vector<uint32_t> > m_quantum;
     std::vector<std::vector<uint32_t> > m_deficit;
     std::vector<uint32_t> m_currVlIdx;

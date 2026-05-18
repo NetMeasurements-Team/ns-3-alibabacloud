@@ -42,6 +42,11 @@ enum class UbOperationType : uint8_t {
     READ = 1   // 读操作
 };
 
+enum class UbTransactionSegmentKind : uint8_t {
+    REQUEST = 0,
+    RESPONSE = 1
+};
+
 // 内存语义操作类型枚举
 enum class UbMemOperationType : uint8_t {
     STORE = 0,
@@ -599,7 +604,7 @@ public:
      */
     void Reset()
     {
-        m_bytesLeft = m_size;
+        m_bytesLeft = m_carrierBytes == 0 ? m_size : m_carrierBytes;
     }
 
     /**
@@ -655,6 +660,106 @@ public:
 
     void SetOrderType(OrderType type) { m_order = type; }
     OrderType GetOrderType() { return m_order; }
+
+    void SetSegmentKind(UbTransactionSegmentKind segmentKind)
+    {
+        m_segmentKind = segmentKind;
+    }
+
+    UbTransactionSegmentKind GetSegmentKind() const
+    {
+        return m_segmentKind;
+    }
+
+    void SetOriginJettyNum(uint32_t originJettyNum)
+    {
+        m_originJettyNum = originJettyNum;
+    }
+
+    uint32_t GetOriginJettyNum() const
+    {
+        return m_originJettyNum;
+    }
+
+    void SetRequestTassn(uint32_t requestTassn)
+    {
+        m_requestTassn = requestTassn;
+    }
+
+    uint32_t GetRequestTassn() const
+    {
+        return m_requestTassn;
+    }
+
+    void SetRequestOpcode(TaOpcode requestOpcode)
+    {
+        m_requestOpcode = requestOpcode;
+    }
+
+    TaOpcode GetRequestOpcode() const
+    {
+        return m_requestOpcode;
+    }
+
+    void SetResponseBytes(uint32_t responseBytes)
+    {
+        m_responseBytes = responseBytes;
+    }
+
+    uint32_t GetResponseBytes() const
+    {
+        return m_responseBytes;
+    }
+
+    void SetRemoteAddress(uint64_t remoteAddress)
+    {
+        m_remoteAddress = remoteAddress;
+    }
+
+    uint64_t GetRemoteAddress() const
+    {
+        return m_remoteAddress;
+    }
+
+    void SetNeedsTransactionResponse(bool needsTransactionResponse)
+    {
+        m_needsTransactionResponse = needsTransactionResponse;
+    }
+
+    bool NeedsTransactionResponse() const
+    {
+        return m_needsTransactionResponse;
+    }
+
+    void SetLogicalBytes(uint32_t logicalBytes)
+    {
+        m_logicalBytes = logicalBytes;
+    }
+
+    uint32_t GetLogicalBytes() const
+    {
+        return m_logicalBytes;
+    }
+
+    void SetPayloadBytes(uint32_t payloadBytes)
+    {
+        m_payloadBytes = payloadBytes;
+    }
+
+    uint32_t GetPayloadBytes() const
+    {
+        return m_payloadBytes;
+    }
+
+    void SetCarrierBytes(uint32_t carrierBytes)
+    {
+        m_carrierBytes = carrierBytes;
+    }
+
+    uint32_t GetCarrierBytes() const
+    {
+        return m_carrierBytes;
+    }
 private:
     // ========== 全局信息 ==========
     uint32_t m_wqeId;   // WQE标识符（Node范围内唯一）。仅用于数据收集。
@@ -678,6 +783,16 @@ private:
     uint32_t m_taSsnStart; // TA层起始分段序号 (Segment Sequence Number)
     uint32_t m_taSsnSize;  // TA层分段数量
     OrderType m_order = OrderType::ORDER_NO;
+    UbTransactionSegmentKind m_segmentKind = UbTransactionSegmentKind::REQUEST;
+    uint32_t m_originJettyNum = UINT32_MAX;
+    uint32_t m_requestTassn = UINT32_MAX;
+    TaOpcode m_requestOpcode = TaOpcode::TA_OPCODE_WRITE;
+    uint32_t m_responseBytes = 0;
+    uint64_t m_remoteAddress = 0;
+    bool m_needsTransactionResponse = true;
+    uint32_t m_logicalBytes = 0;
+    uint32_t m_payloadBytes = 0;
+    uint32_t m_carrierBytes = 0;
 
     // ========== TA层动态信息 (追踪WQE segment的完成) ==========
     uint32_t m_bytesLeft = 0; // 剩余的字节数
@@ -931,7 +1046,7 @@ public:
      */
     void ResetSentBytes()
     {
-        m_bytesLeft = m_size;
+        m_bytesLeft = m_carrierBytes == 0 ? m_size : m_carrierBytes;
     }
 
     /**
@@ -941,7 +1056,8 @@ public:
      */
     void ResetSentBytes(uint32_t sentBytes)
     {
-        m_bytesLeft = m_size - sentBytes;
+        const uint32_t progressBytes = m_carrierBytes == 0 ? m_size : m_carrierBytes;
+        m_bytesLeft = sentBytes >= progressBytes ? 0 : progressBytes - sentBytes;
     }
 
     /**
@@ -988,6 +1104,108 @@ public:
     void SetTpn(uint32_t tpn) { m_tpn = tpn; }
 
     uint32_t GetTpn() { return m_tpn; }
+
+    void SetSegmentKind(UbTransactionSegmentKind segmentKind)
+    {
+        m_segmentKind = segmentKind;
+    }
+
+    UbTransactionSegmentKind GetSegmentKind() const
+    {
+        return m_segmentKind;
+    }
+
+    void SetOriginJettyNum(uint32_t originJettyNum)
+    {
+        m_originJettyNum = originJettyNum;
+    }
+
+    uint32_t GetOriginJettyNum() const
+    {
+        return m_originJettyNum;
+    }
+
+    void SetRequestTassn(uint32_t requestTassn)
+    {
+        m_requestTassn = requestTassn;
+    }
+
+    uint32_t GetRequestTassn() const
+    {
+        return m_requestTassn;
+    }
+
+    void SetRequestOpcode(TaOpcode requestOpcode)
+    {
+        m_requestOpcode = requestOpcode;
+    }
+
+    TaOpcode GetRequestOpcode() const
+    {
+        return m_requestOpcode;
+    }
+
+    void SetResponseBytes(uint32_t responseBytes)
+    {
+        m_responseBytes = responseBytes;
+    }
+
+    uint32_t GetResponseBytes() const
+    {
+        return m_responseBytes;
+    }
+
+    void SetRemoteAddress(uint64_t remoteAddress)
+    {
+        m_remoteAddress = remoteAddress;
+    }
+
+    uint64_t GetRemoteAddress() const
+    {
+        return m_remoteAddress;
+    }
+
+    void SetNeedsTransactionResponse(bool needsTransactionResponse)
+    {
+        m_needsTransactionResponse = needsTransactionResponse;
+    }
+
+    bool NeedsTransactionResponse() const
+    {
+        return m_needsTransactionResponse;
+    }
+
+    void SetLogicalBytes(uint32_t logicalBytes)
+    {
+        m_logicalBytes = logicalBytes;
+    }
+
+    uint32_t GetLogicalBytes() const
+    {
+        return m_logicalBytes;
+    }
+
+    void SetPayloadBytes(uint32_t payloadBytes)
+    {
+        m_payloadBytes = payloadBytes;
+    }
+
+    uint32_t GetPayloadBytes() const
+    {
+        return m_payloadBytes;
+    }
+
+    void SetCarrierBytes(uint32_t carrierBytes)
+    {
+        m_carrierBytes = carrierBytes;
+        m_bytesLeft = carrierBytes;
+        m_psnSize = (carrierBytes + UB_MTU_BYTE - 1) / UB_MTU_BYTE;
+    }
+
+    uint32_t GetCarrierBytes() const
+    {
+        return m_carrierBytes;
+    }
 private:
     // ========== 任务描述信息 ==========
     uint32_t m_src{0};                              // 源节点标识符
@@ -1010,6 +1228,16 @@ private:
     uint32_t m_jettyNum;                // 来源Jetty标号，报文头中需要携带
     uint16_t m_taMsn{0};                // 所属WQE的TA层消息序号
     uint16_t m_taSsn{0};                // 本分段的TA层分段序号
+    UbTransactionSegmentKind m_segmentKind{UbTransactionSegmentKind::REQUEST};
+    uint32_t m_originJettyNum{UINT32_MAX};
+    uint32_t m_requestTassn{UINT32_MAX};
+    TaOpcode m_requestOpcode{TaOpcode::TA_OPCODE_WRITE};
+    uint32_t m_responseBytes{0};
+    uint64_t m_remoteAddress{0};
+    bool m_needsTransactionResponse{true};
+    uint32_t m_logicalBytes{0};
+    uint32_t m_payloadBytes{0};
+    uint32_t m_carrierBytes{0};
 
     // ========== TP层静态信息 (调度时设置，之后不变) ==========
     uint32_t m_tpMsn{0};    // TP层消息序号
@@ -1027,17 +1255,18 @@ private:
  * 用于标识传输组，管理多个相关的TP通道。
  */
 struct TpgTag {
+    struct Fields {
+        uint64_t src : 18;
+        uint64_t dest : 18;
+        uint64_t priority : 4;
+        uint64_t type : 2;
+        uint64_t id : 4;
+        uint64_t reserved : 18;
+    };
+
     union {
         uint64_t value;
-
-        struct {
-            uint64_t src : 18;
-            uint64_t dest : 18;
-            uint64_t priority : 4;
-            uint64_t type : 2;
-            uint64_t id : 4;
-            uint64_t reserved : 18;
-        } fields;
+        Fields fields;
     };
 
     // 构造函数
@@ -1162,4 +1391,3 @@ constexpr bool ROUTING_SHORTEST = true;   // 1: shortest paths
 } // namespace ns3
 
 #endif /* UB_DATATYPE_H */
-

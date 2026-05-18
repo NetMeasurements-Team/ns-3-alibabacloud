@@ -28,8 +28,12 @@ TypeId UbFault::GetTypeId(void)
     static TypeId tid = TypeId("ns3::UbFault")
                             .SetParent<Object>()
                             .AddConstructor<UbFault>()
-                            .AddAttribute("UbFaultUsePacketSpray", "is Packet Follow or not.", BooleanValue(false),
-                                          MakeBooleanAccessor(&UbFault::isPacketFlow), MakeBooleanChecker());
+                            .AddAttribute("UbFaultUsePacketSpray",
+                                          "When true, use per-packet spray for fault-injected flows; "
+                                          "when false, use per-flow forwarding.",
+                                          BooleanValue(false),
+                                          MakeBooleanAccessor(&UbFault::isPacketFlow),
+                                          MakeBooleanChecker());
     return tid;
 }
 vector<string> UbFault::Split(const string &s, char delim)
@@ -148,7 +152,7 @@ uint32_t UbFault::GetPacketSize(Ptr<Packet> packet)
     UdpHeader UHeader;
     Ipv4Header I4Header;
     UbDatalinkPacketHeader DataLinkPacketHeader;
-    UbNetworkHeader networkHeader;
+    UbIpBasedNetworkHeader networkHeader;
     uint32_t MAExtTaHeaderSize = MAExtTaHeader.GetSerializedSize();
     uint32_t UbTransactionHeaderSize = TransactionHeader.GetSerializedSize();
     uint32_t UbTransportHeaderSize = TransportHeader.GetSerializedSize();

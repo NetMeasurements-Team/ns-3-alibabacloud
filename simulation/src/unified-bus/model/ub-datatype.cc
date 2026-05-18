@@ -9,12 +9,12 @@ namespace ns3 {
  * GlobalValue
  ********************/
 GlobalValue g_ub_priority_num = GlobalValue("UB_PRIORITY_NUM",
-                                            "支持的优先级数量 (1-16)",
+                                            "Number of priority levels (1-16).",
                                             IntegerValue(16),
                                             MakeIntegerChecker<int>(1, 16));
 
 GlobalValue g_ub_vl_num = GlobalValue("UB_VL_NUM",
-                                      "支持的虚通道数量(1-16)，目前与优先级一一对应",
+                                      "Number of virtual lanes (1-16); currently mapped 1:1 to priorities.",
                                       IntegerValue(16),
                                       MakeIntegerChecker<int>(1, 16));
 

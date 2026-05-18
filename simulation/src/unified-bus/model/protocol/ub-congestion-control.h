@@ -11,16 +11,13 @@ namespace ns3 {
 
 class UbTransportChannel;
 
-// Currently only CAQM is implemented, other algorithms to be added
 enum CongestionCtrlAlgo {
     CAQM,
-    LDCP,
-    DCQCN
+    DCQCN,
 };
 
 /**
- * @brief UB Congestion control parent class.
- * Only Caqm can be used now.
+ * @brief UB congestion control base class.
  */
 class UbCongestionControl : public Object {
 public:
@@ -30,43 +27,68 @@ public:
 
     CongestionCtrlAlgo GetCongestionAlgo() {return m_algoType;}
 
-    // 获取剩余窗口，CAQM LDCP需要
     virtual uint32_t GetRestCwnd() {return UB_MTU_BYTE;}
 
-    // 发送端生成networkHeader包头
-    virtual UbNetworkHeader SenderGenNetworkHeader()
+    virtual bool IsCcLimited(uint32_t bytes)
     {
-        throw std::runtime_error("Congestion Ctrl not available");
+        return false;
+    }
+
+    // 发送端在统一的IP-based network header上打补丁
+    virtual void OnSenderPrepareIpBasedNetworkHeader(UbIpBasedNetworkHeader& header)
+    {
+        (void)header;
     }
 
     // 发送端发包，更新数据
-    virtual void SenderUpdateCongestionCtrlData(uint32_t psn, uint32_t size) {}
+    virtual void OnSenderDataPacketSent(uint32_t psn, uint32_t size) {}
+
+    // 交换机在包进入目标出端口 backlog 时进行处理
+    virtual void OnSwitchPostEnqueue(uint32_t inPort, uint32_t outPort, Ptr<Packet> p) {}
 
     // 交换机收到包进行转发，对其进行处理
-    virtual void SwitchForwardPacket(uint32_t inPort, uint32_t outPort, Ptr<Packet> p) {}
+    virtual void OnSwitchPostDequeue(uint32_t inPort, uint32_t outPort, Ptr<Packet> p) {}
 
     // 接收端接到数据包后记录数据
-    virtual void RecverRecordPacketData(uint32_t psn, uint32_t size, UbNetworkHeader header) {}
+    virtual void OnReceiverDataPacketReceived(uint32_t psn,
+                                              uint32_t size,
+                                              UbIpBasedNetworkHeader header)
+    {
+        (void)psn;
+        (void)size;
+        (void)header;
+    }
 
-    // 接收端生成ack的cetph头
-    virtual UbCongestionExtTph RecverGenAckCeTphHeader(uint32_t psnStart, uint32_t psnEnd)
+    // 接收端生成ack上的拥塞反馈头
+    virtual UbCongestionExtTph OnReceiverPrepareAckCongestionHeader(uint32_t psnStart,
+                                                                    uint32_t psnEnd)
     {
         throw std::runtime_error("Congestion Ctrl not available");
     }
 
-    // 发送端收到ack，调整窗口、速率等数据
-    virtual void SenderRecvAck(uint32_t psn, UbCongestionExtTph header) {}
+    // 发送端收到拥塞通知，调整窗口、速率等数据
+    virtual void OnSenderCongestionNotification(TpOpcode opcode,
+                                                uint32_t psn,
+                                                UbCongestionExtTph header)
+    {
+        (void)psn;
+        (void)header;
+        (void)opcode;
+    }
+
+    // 发送端TP在发送工作清空后进入空闲态
+    virtual void OnSenderTransportIdle() {}
 
     // 绑定switch，初始化参数
-    virtual void SwitchInit(Ptr<UbSwitch> sw) {}
+    virtual void OnSwitchAttached(Ptr<UbSwitch> sw);
 
     // 绑定tp，初始化参数
-    virtual void TpInit(Ptr<UbTransportChannel> tp) {}
+    virtual void OnTpAttached(Ptr<UbTransportChannel> tp) {}
 
     static Ptr<UbCongestionControl> Create(UbNodeType_t nodeType);
 
-    // 根据caqm使能情况获取
-    TpOpcode GetTpAckOpcode()
+    // 选择接收端发送ACK时使用的TP opcode
+    virtual TpOpcode GetAckOpcode() const
     {
         if (m_congestionCtrlEnabled)
             return TpOpcode::TP_OPCODE_ACK_WITH_CETPH;

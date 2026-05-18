@@ -2,11 +2,14 @@
 #ifndef UB_TRANSPORT_H
 #define UB_TRANSPORT_H
 
+#include <map>
 #include <queue>
+#include <utility>
 #include "ns3/object.h"
 #include "ns3/packet.h"
 #include "ns3/ipv4-address.h"
 #include "ns3/callback.h"
+#include "ns3/ub-sliding-bitmap-window.h"
 #include "ub-header.h"
 #include "ns3/timer.h"
 #include "ns3/ub-congestion-control.h"
@@ -91,11 +94,17 @@ public:
      * @param port Port to send through
      */
     Ptr<Packet> GetNextPacket() override;
-    uint32_t GetNextPacketSize();
+    uint32_t GetNextPacketSize() override;
     bool IsEmpty() override;
     bool IsLimited() override;
 
-    Ptr<Packet> GenDataPacket(Ptr<UbWqeSegment> wqeSegment, uint32_t payload_size);
+    Ptr<Packet> GenDataPacket(Ptr<UbWqeSegment> wqeSegment,
+                              uint32_t payloadSize,
+                              uint32_t wireLengthBytes,
+                              uint32_t progressBytes);
+
+    void EnqueueDcqcnCnp(uint8_t ecn, bool location);
+    Ptr<Packet> BuildDcqcnCnp(uint8_t ecn, bool location) const;
 
     /**
      * @brief Process Transport Acknowledgment message
@@ -224,6 +233,7 @@ public:
      */
     bool IsRepeatPacket(uint64_t psn);
     std::queue<Ptr<Packet>> m_ackQ; // ack queue high pg
+    std::queue<Ptr<Packet>> m_cnpQ; // higher-priority control queue for standalone CNP
 
     virtual IngressQueueType GetIngressQueueType() override;
 
@@ -244,17 +254,46 @@ public:
 
     void UpdatePsnCnt(uint32_t num) { m_tpPsnCnt += num; }
     void PushWqeSegment(Ptr<UbWqeSegment> segment) {
-        if (m_wqeSegmentVector.empty() && m_ackQ.empty()) {
+        if (m_wqeSegmentVector.empty() && m_ackQ.empty() && m_cnpQ.empty()) {
             m_headArrivalTime = Simulator::Now();
         }
         m_wqeSegmentVector.push_back(segment);
     }
 
     uint32_t GetWqeSegmentVecSize() { return m_wqeSegmentVector.size(); }
+    uint32_t GetActiveSendSegmentCount() const;
+
+    Ptr<UbCongestionControl> GetCongestionCtrlForTest() const { return m_congestionCtrl; }
+    void EnqueueAckForTest(Ptr<Packet> p) { m_ackQ.push(p); }
+    void EnqueueCnpForTest(Ptr<Packet> p) { m_cnpQ.push(p); }
+    Ptr<Packet> GetNextPacketForTest() { return GetNextPacket(); }
+    uint32_t GetPendingCnpCountForTest() const { return static_cast<uint32_t>(m_cnpQ.size()); }
+    uint32_t GetPsnSndUnaForTest() const { return m_psnSndUna; }
 private:
+    struct InboundTaUnitState
+    {
+        Ptr<UbWqeSegment> segment;
+        uint32_t bytesReceived{0};
+    };
+
+    struct BufferedInboundPacket
+    {
+        UbTransportHeader tpHeader;
+        UbTransactionHeader taHeader;
+        uint32_t logicalBytes{0};
+        uint32_t payloadBytes{0};
+        uint32_t taskId{0};
+    };
+
     void DoDispose() override;
 
     Ptr<UbTransaction> GetTransaction();
+    Ptr<UbWqeSegment> TrackInboundTaPacket(const UbTransportHeader& tpHeader,
+                                           const UbTransactionHeader& taHeader,
+                                           uint32_t logicalBytes,
+                                           uint32_t payloadBytes,
+                                           uint32_t taskId);
+    bool ShouldCompleteOnTpAck(const Ptr<UbWqeSegment>& segment) const;
 
     TracedCallback<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t> m_traceFirstPacketSendsNotify;
     TracedCallback<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t> m_traceLastPacketSendsNotify;
@@ -262,6 +301,8 @@ private:
     TracedCallback<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t> m_traceLastPacketReceivesNotify;
     TracedCallback<uint32_t, uint32_t, uint32_t> m_traceWqeSegmentSendsNotify;
     TracedCallback<uint32_t, uint32_t, uint32_t> m_traceWqeSegmentCompletesNotify;
+//  TracedCallback<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+//                  uint32_t, PacketType, uint32_t, uint32_t, UbPacketTraceTag> m_tpRecvNotify;
     TracedCallback<UbTpRecvTraceData> m_tpRecvNotify;
 
     void FirstPacketSendsNotify(uint32_t nodeId, uint32_t taskId, uint32_t mTpn,
@@ -275,6 +316,8 @@ private:
     void WqeSegmentSendsNotify(uint32_t nodeId, uint32_t taskId, uint32_t taSsn);
     void WqeSegmentCompletesNotify(uint32_t nodeId, uint32_t taskId, uint32_t taSsn);
     void TpRecvNotify(UbTpRecvTraceData data);
+//    void TpRecvNotify(uint32_t packetUid, uint32_t psn, uint32_t src, uint32_t dst, uint32_t srcTpn, uint32_t dstTpn,
+//                      PacketType type, uint32_t size, uint32_t taskId, UbPacketTraceTag traceTag);
     // Node and controller references
     uint32_t m_nodeId;
 
@@ -293,6 +336,8 @@ private:
     Ipv4Address m_dip;        // Destination IP address
 
     std::vector<Ptr<UbWqeSegment>> m_remoteRequest; // FIFO
+    std::map<std::pair<uint32_t, uint32_t>, InboundTaUnitState> m_inboundTaUnits;
+    std::map<uint64_t, BufferedInboundPacket> m_bufferedInboundPackets;
 
     // Queue parameters
     uint32_t m_maxQueueSize;
@@ -310,7 +355,7 @@ private:
     uint64_t        m_tpPsnCnt {0};       // TP层总计获取的数据包个数计数
     static constexpr uint32_t DEFAULT_OOO_THRESHOLD = 2048;
     uint32_t m_psnOooThreshold = DEFAULT_OOO_THRESHOLD;
-    std::vector<bool> m_recvPsnBitset{std::vector<bool>(DEFAULT_OOO_THRESHOLD, false)};
+    UbSlidingBitmapWindow m_recvPsnWindow{DEFAULT_OOO_THRESHOLD};
 
     // Status flags
     bool m_isActive = true;

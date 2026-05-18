@@ -37,15 +37,15 @@ public:
     // Transport channel management
     /**
      * @brief Create a new transport channel
-     * @param conn Connection aggregating al parameters
-     *        @struct Connection
-     *              @param src Source identifier
-     *              @param dest Destination identifier
-     *              @param sport Source port
-     *              @param dport Destination port
-     *              @param tpn Transport identifier
-     *              @return Pointer to created transport channel
+     * @param src Source identifier
+     * @param dest Destination identifier
+     * @param sport Source port
+     * @param dport Destination port
+     * @param tpn Transport identifier
+     * @return Pointer to created transport channel
      */
+    // bool CreateTp(uint32_t src, uint32_t dest, uint8_t sport, uint8_t dport, UbPriority priority,
+    //               uint32_t srcTpn, uint32_t dstTpn, Ptr<UbCongestionControl> congestionCtrl);
     bool CreateTp(const Connection& conn, Ptr<UbCongestionControl> congestionCtrl);
 
     /**
@@ -159,6 +159,16 @@ public:
      * @brief 判断TP实例是否存在
      */
     bool IsTPExists(uint32_t tpn);
+
+    uint32_t GetActiveSenderFlowCount() const { return m_activeSenderFlowCount; }
+    void IncrementActiveSenderFlowCount() { ++m_activeSenderFlowCount; }
+    void DecrementActiveSenderFlowCount()
+    {
+        if (m_activeSenderFlowCount > 0)
+        {
+            --m_activeSenderFlowCount;
+        }
+    }
 private:
     Ptr<UbFunction> m_function; // 功能层
     Ptr<UbTransaction> m_transaction; // 事务层
@@ -178,6 +188,7 @@ private:
     std::vector<std::vector<uint8_t>> m_dstPriToTpRrIndex{}; // level_0 dst_node, level_1 priority, level_2 iteration
 
     Ptr<TpConnectionManager> m_tpnConn; // 当前节点维护的tpnConn
+    uint32_t m_activeSenderFlowCount{0};
 
 };
 

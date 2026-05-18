@@ -528,36 +528,36 @@ uint32_t UbDatalinkPacketHeader::Deserialize(Buffer::Iterator start)
 
 /*
  ***************************************************
- * UbNetworkHeader implementation
+ * UbIpBasedNetworkHeader implementation
  ***************************************************
  */
 
-UbNetworkHeader::UbNetworkHeader()
+UbIpBasedNetworkHeader::UbIpBasedNetworkHeader()
 {
     m_fields.raw13 = 0;
 }
 
-UbNetworkHeader::~UbNetworkHeader()
+UbIpBasedNetworkHeader::~UbIpBasedNetworkHeader()
 {
 }
 
-TypeId UbNetworkHeader::GetTypeId(void)
+TypeId UbIpBasedNetworkHeader::GetTypeId(void)
 {
-    static TypeId tid = TypeId("ns3::UbNetworkHeader")
+    static TypeId tid = TypeId("ns3::UbIpBasedNetworkHeader")
                             .SetParent<Header>()
                             .SetGroupName("UnifiedBus")
-                            .AddConstructor<UbNetworkHeader>();
+                            .AddConstructor<UbIpBasedNetworkHeader>();
     return tid;
 }
 
-TypeId UbNetworkHeader::GetInstanceTypeId(void) const
+TypeId UbIpBasedNetworkHeader::GetInstanceTypeId(void) const
 {
     return GetTypeId();
 }
 
-void UbNetworkHeader::Print(std::ostream& os) const
+void UbIpBasedNetworkHeader::Print(std::ostream& os) const
 {
-    os << "UbNetworkHeader: "
+    os << "UbIpBasedNetworkHeader: "
        << "Mode=" << static_cast<uint32_t>(m_mode) << ", NPI=" << std::hex << m_npi << std::dec;
 
     switch (m_mode) {
@@ -582,7 +582,7 @@ void UbNetworkHeader::Print(std::ostream& os) const
     }
 }
 
-void UbNetworkHeader::Serialize(Buffer::Iterator start) const
+void UbIpBasedNetworkHeader::Serialize(Buffer::Iterator start) const
 {
     // 字节0-1: [Mode:3][Fields:13]
     uint16_t byte01 = ((static_cast<uint16_t>(m_mode & 0x07) << 13)) | (m_fields.raw13 & 0x1FFF);
@@ -598,7 +598,7 @@ void UbNetworkHeader::Serialize(Buffer::Iterator start) const
     start.WriteU8(m_npi & 0xFF);
 }
 
-uint32_t UbNetworkHeader::Deserialize(Buffer::Iterator start)
+uint32_t UbIpBasedNetworkHeader::Deserialize(Buffer::Iterator start)
 {
     // 字节0-1: [Mode:3][Fields:13]
     uint16_t byte01 = start.ReadNtohU16();
@@ -618,20 +618,20 @@ uint32_t UbNetworkHeader::Deserialize(Buffer::Iterator start)
     return totalHeaderSize;
 }
 
-uint32_t UbNetworkHeader::GetSerializedSize(void) const
+uint32_t UbIpBasedNetworkHeader::GetSerializedSize(void) const
 {
     return totalHeaderSize;
 }
 
 // Setters
-void UbNetworkHeader::SetMode(uint8_t mode)
+void UbIpBasedNetworkHeader::SetMode(uint8_t mode)
 {
     m_mode = mode & 0x07; // 确保只有3位
     // 清空raw13，准备设置新的mode字段
     m_fields.raw13 = 0;
 }
 
-void UbNetworkHeader::SetLocation(bool location)
+void UbIpBasedNetworkHeader::SetLocation(bool location)
 {
     if (m_mode == 0 || m_mode == 2 || m_mode == 4) {
         if (location) {
@@ -642,7 +642,7 @@ void UbNetworkHeader::SetLocation(bool location)
     }
 }
 
-void UbNetworkHeader::SetEnable(bool enable)
+void UbIpBasedNetworkHeader::SetEnable(bool enable)
 {
     if (m_mode == 0) {
         if (enable) {
@@ -653,7 +653,7 @@ void UbNetworkHeader::SetEnable(bool enable)
     }
 }
 
-void UbNetworkHeader::SetC(uint8_t c)
+void UbIpBasedNetworkHeader::SetC(uint8_t c)
 {
     if (m_mode == 0) {
         if (c) {
@@ -664,7 +664,7 @@ void UbNetworkHeader::SetC(uint8_t c)
     }
 }
 
-void UbNetworkHeader::SetI(uint8_t i)
+void UbIpBasedNetworkHeader::SetI(uint8_t i)
 {
     if (m_mode == 0) {
         if (i) {
@@ -675,7 +675,7 @@ void UbNetworkHeader::SetI(uint8_t i)
     }
 }
 
-void UbNetworkHeader::SetHint(uint8_t hint)
+void UbIpBasedNetworkHeader::SetHint(uint8_t hint)
 {
     if (m_mode == 0) {
         m_fields.raw13 &= ~0xFF;         // 清除低7位
@@ -683,7 +683,7 @@ void UbNetworkHeader::SetHint(uint8_t hint)
     }
 }
 
-void UbNetworkHeader::SetTimeStamp(uint16_t ts)
+void UbIpBasedNetworkHeader::SetTimeStamp(uint16_t ts)
 {
     if (m_mode == 2) {
         m_fields.raw13 &= ~(0x3FF << 2);       // 清除第2-11位
@@ -691,7 +691,7 @@ void UbNetworkHeader::SetTimeStamp(uint16_t ts)
     }
 }
 
-void UbNetworkHeader::SetFecn(uint8_t fecn)
+void UbIpBasedNetworkHeader::SetFecn(uint8_t fecn)
 {
     if (m_mode == 2 || m_mode == 4) {
         m_fields.raw13 &= ~0x03;         // 清除低2位
@@ -701,7 +701,12 @@ void UbNetworkHeader::SetFecn(uint8_t fecn)
 
 
 // Getters - 直接从raw13读取
-bool UbNetworkHeader::GetLocation() const
+uint8_t UbIpBasedNetworkHeader::GetMode() const
+{
+    return m_mode;
+}
+
+bool UbIpBasedNetworkHeader::GetLocation() const
 {
     if (m_mode == 0 || m_mode == 2 || m_mode == 4) {
         return (m_fields.raw13 & (1 << 12)) != 0;
@@ -709,7 +714,7 @@ bool UbNetworkHeader::GetLocation() const
     return false;
 }
 
-bool UbNetworkHeader::GetEnable() const
+bool UbIpBasedNetworkHeader::GetEnable() const
 {
     if (m_mode == 0) {
         return (m_fields.raw13 & (1 << 10)) != 0;
@@ -717,7 +722,7 @@ bool UbNetworkHeader::GetEnable() const
     return false;
 }
 
-uint8_t UbNetworkHeader::GetC() const
+uint8_t UbIpBasedNetworkHeader::GetC() const
 {
     if (m_mode == 0) {
         return (m_fields.raw13 & (1 << 9)) != 0;
@@ -725,7 +730,7 @@ uint8_t UbNetworkHeader::GetC() const
     return 0;
 }
 
-uint8_t UbNetworkHeader::GetI() const
+uint8_t UbIpBasedNetworkHeader::GetI() const
 {
     if (m_mode == 0) {
         return (m_fields.raw13 & (1 << 8)) != 0;
@@ -733,7 +738,7 @@ uint8_t UbNetworkHeader::GetI() const
     return 0;
 }
 
-uint8_t UbNetworkHeader::GetHint() const
+uint8_t UbIpBasedNetworkHeader::GetHint() const
 {
     if (m_mode == 0) {
         return m_fields.raw13 & 0xFF; // 提取低8位
@@ -741,7 +746,7 @@ uint8_t UbNetworkHeader::GetHint() const
     return 0;
 }
 
-uint16_t UbNetworkHeader::GetTimeStamp() const
+uint16_t UbIpBasedNetworkHeader::GetTimeStamp() const
 {
     if (m_mode == 2) {
         return (m_fields.raw13 >> 2) & 0x3FF; // 提取第2-11位
@@ -749,7 +754,7 @@ uint16_t UbNetworkHeader::GetTimeStamp() const
     return 0;
 }
 
-uint8_t UbNetworkHeader::GetFecn() const
+uint8_t UbIpBasedNetworkHeader::GetFecn() const
 {
     if (m_mode == 2 || m_mode == 4) {
         return m_fields.raw13 & 0x03; // 提取低2位
@@ -983,7 +988,7 @@ uint32_t UbTransportHeader::GetTpMsn() const
 // Check validity methods
 bool UbTransportHeader::IsValidOpcode() const
 {
-    return m_tpOpcode < static_cast<uint8_t>(TpOpcode::TP_OPCODE_CNP);
+    return m_tpOpcode <= static_cast<uint8_t>(TpOpcode::TP_OPCODE_CNP);
 }
 
 bool UbTransportHeader::IsValidNLP() const
@@ -1307,6 +1312,89 @@ void UbCongestionExtTph::SetRawBytes4to7(uint32_t rawValue)
 uint32_t UbCongestionExtTph::GetRawBytes4to7(void) const
 {
     return m_congestionFields.raw;
+}
+
+UbCnpExtTph::UbCnpExtTph() = default;
+
+UbCnpExtTph::~UbCnpExtTph() = default;
+
+TypeId
+UbCnpExtTph::GetTypeId(void)
+{
+    static TypeId tid = TypeId("ns3::UbCnpExtTph")
+                            .SetParent<Header>()
+                            .SetGroupName("UnifiedBus")
+                            .AddConstructor<UbCnpExtTph>();
+    return tid;
+}
+
+TypeId
+UbCnpExtTph::GetInstanceTypeId(void) const
+{
+    return GetTypeId();
+}
+
+void
+UbCnpExtTph::Print(std::ostream& os) const
+{
+    os << "UbCnpExtTph: Ecn=" << static_cast<uint32_t>(m_ecn) <<
+          " Location=" << m_location;
+}
+
+void
+UbCnpExtTph::Serialize(Buffer::Iterator start) const
+{
+    Buffer::Iterator i = start;
+    const uint32_t word0 =
+        (static_cast<uint32_t>(m_ecn & 0x3U) << 30) |
+        (static_cast<uint32_t>(m_location ? 1U : 0U) << 29);
+    i.WriteHtonU32(word0);
+    i.WriteHtonU32(0);
+    i.WriteHtonU32(0);
+    i.WriteHtonU32(0);
+}
+
+uint32_t
+UbCnpExtTph::Deserialize(Buffer::Iterator start)
+{
+    Buffer::Iterator i = start;
+    const uint32_t word0 = i.ReadNtohU32();
+    m_ecn = static_cast<uint8_t>((word0 >> 30) & 0x3U);
+    m_location = ((word0 >> 29) & 0x1U) != 0;
+    i.ReadNtohU32();
+    i.ReadNtohU32();
+    i.ReadNtohU32();
+    return GetSerializedSize();
+}
+
+uint32_t
+UbCnpExtTph::GetSerializedSize(void) const
+{
+    return totalHeaderSize;
+}
+
+void
+UbCnpExtTph::SetEcn(uint8_t ecn)
+{
+    m_ecn = ecn & 0x3U;
+}
+
+uint8_t
+UbCnpExtTph::GetEcn() const
+{
+    return m_ecn;
+}
+
+void
+UbCnpExtTph::SetLocation(bool location)
+{
+    m_location = location;
+}
+
+bool
+UbCnpExtTph::GetLocation() const
+{
+    return m_location;
 }
 
 /*
@@ -2663,4 +2751,3 @@ uint8_t UbDummyTransactionHeader::GetTaOpcode() const
 }
 
 } // namespace ns3
-

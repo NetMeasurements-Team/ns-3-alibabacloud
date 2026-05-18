@@ -32,7 +32,7 @@ private:
     uint32_t m_nodeId = 0;
     uint32_t m_lbHashSalt = 0;
     bool m_usePacketSpray = false;
-    bool m_useShortestPaths = false;
+    bool m_useShortestPaths = true;
     bool m_pktTraceEnabled = false;
     void LdstRecvNotify(uint32_t packetUid, uint32_t src, uint32_t dst,
                         PacketType type, uint32_t size, uint32_t taskId, UbPacketTraceTag traceTag);

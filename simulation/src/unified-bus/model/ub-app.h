@@ -67,22 +67,26 @@ private:
     void MemTaskCompletesNotify(uint32_t nodeId, uint32_t taskId);
     void WqeTaskStartsNotify(uint32_t nodeId, uint32_t jettyNum, uint32_t taskId);
     void WqeTaskCompletesNotify(uint32_t nodeId, uint32_t jettyNum, uint32_t taskId);
+    void WriteNotifyTaskStarts(uint32_t nodeId, uint32_t jettyNum, uint32_t baseTaskId);
+    void WriteNotifyTaskCompletes(uint32_t nodeId, uint32_t jettyNum, uint32_t baseTaskId);
 
     map<std::string, TaOpcode> TaOpcodeMap = {
         {"URMA_WRITE", TaOpcode::TA_OPCODE_WRITE},
+        {"URMA_READ", TaOpcode::TA_OPCODE_READ},
         {"MEM_STORE", TaOpcode::TA_OPCODE_WRITE},
         {"MEM_LOAD", TaOpcode::TA_OPCODE_READ}
     };
 
     // 控制器
-    bool m_multiPathEnable;
+    bool m_multiPathEnable = false;
 
-    GetTpnRuleT m_getTpnRule = GetTpnRuleT::BY_PEERNODE_PRIORITY; // 获取Tpn的方式
-    bool m_useShortestPaths = true; // 是否根据跳数寻找最短路径
+    GetTpnRuleT m_getTpnRule = GetTpnRuleT::BY_PEERNODE_PRIORITY;
+    bool m_useShortestPaths = true;
 
     Ptr<Node> m_node;              // 当前节点
 
     uint32_t m_jettyNum = 0;       // 当前节点维护的jettynum,不会重复
+
     Ptr<UniformRandomVariable> m_random;
 
 };

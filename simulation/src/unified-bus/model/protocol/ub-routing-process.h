@@ -75,7 +75,7 @@ private:
 
     uint32_t m_nodeId;
     UbRoutingAlgorithm m_routingAlgorithm = UbRoutingAlgorithm::HASH;
-    uint64_t CalcHash(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport, uint8_t priority);
+    uint64_t CalcHash(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport, uint8_t priority, uint32_t salt);
 
     // 全局端口集合池：存储所有唯一的端口集合
     std::unordered_map<std::vector<uint16_t>, std::shared_ptr<std::vector<uint16_t> >, VectorHash> m_portSetPool;

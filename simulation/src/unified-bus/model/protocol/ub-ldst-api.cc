@@ -18,7 +18,7 @@ TypeId UbLdstApi::GetTypeId(void)
                             .SetGroupName("UnifiedBus")
                             .AddAttribute("UsePacketSpray",
                                           "Enable per-packet load balancing across equal-cost paths.",
-                                          BooleanValue(true),
+                                          BooleanValue(false),
                                           MakeBooleanAccessor(&UbLdstApi::m_usePacketSpray),
                                           MakeBooleanChecker())
                             .AddAttribute("UseShortestPaths",

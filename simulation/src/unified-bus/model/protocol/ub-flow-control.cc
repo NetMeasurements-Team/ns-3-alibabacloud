@@ -3,11 +3,36 @@
 #include "ns3/ub-link.h"
 #include "ns3/log.h"
 #include "ns3/ub-network-address.h"
+#include "ns3/ub-utils.h"
+#include "ns3/ub-datatype.h"
 using namespace utils;
 
 namespace ns3 {
 NS_OBJECT_ENSURE_REGISTERED(UbFlowControl);
 NS_LOG_COMPONENT_DEFINE("UbFlowControl");
+
+namespace {
+
+bool
+IsValidCbfcCellGrain(uint8_t grain)
+{
+    switch (grain)
+    {
+    case 1:
+    case 2:
+    case 4:
+    case 8:
+    case 16:
+    case 32:
+    case 64:
+    case 128:
+        return true;
+    default:
+        return false;
+    }
+}
+
+} // namespace
 
 TypeId UbFlowControl::GetTypeId(void)
 {
@@ -15,45 +40,180 @@ TypeId UbFlowControl::GetTypeId(void)
     return tid;
 }
 
+TypeId UbPfcDecisionHook::GetTypeId(void)
+{
+    static TypeId tid = TypeId("ns3::UbPfcDecisionHook").SetParent<Object>();
+    return tid;
+}
+
+TypeId UbPfcFixedDecisionHook::GetTypeId(void)
+{
+    static TypeId tid = TypeId("ns3::UbPfcFixedDecisionHook")
+        .SetParent<UbPfcDecisionHook>()
+        .AddConstructor<UbPfcFixedDecisionHook>();
+    return tid;
+}
+
+void UbPfcFixedDecisionHook::Init(uint64_t xoffThresholdBytes, uint64_t xonThresholdBytes)
+{
+    m_xoffThresholdBytes = xoffThresholdBytes;
+    m_xonThresholdBytes = xonThresholdBytes;
+}
+
+UbPfcDecision UbPfcFixedDecisionHook::Evaluate(Ptr<UbQueueManager> queueManager,
+                                               uint32_t inPort,
+                                               uint32_t priority) const
+{
+    auto queueOcc = queueManager->GetIngressQueueOccupancy(inPort, priority);
+    auto switchOcc = queueManager->GetSwitchBufferOccupancy();
+    return {
+        .pause = queueOcc.total_bytes >= m_xoffThresholdBytes,
+        .resume = queueOcc.total_bytes < m_xonThresholdBytes,
+        .ingress_total_bytes = queueOcc.total_bytes,
+        .ingress_shared_bytes = queueOcc.shared_bytes,
+        .ingress_headroom_bytes = queueOcc.headroom_bytes,
+        .switch_shared_pool_used_bytes = switchOcc.shared_pool_used_bytes,
+        .switch_total_buffered_bytes = switchOcc.total_buffered_bytes,
+        .xoff_threshold_bytes = m_xoffThresholdBytes,
+        .xon_threshold_bytes = m_xonThresholdBytes,
+    };
+}
+
+TypeId UbPfcDynamicDecisionHook::GetTypeId(void)
+{
+    static TypeId tid = TypeId("ns3::UbPfcDynamicDecisionHook")
+        .SetParent<UbPfcDecisionHook>()
+        .AddConstructor<UbPfcDynamicDecisionHook>();
+    return tid;
+}
+
+UbPfcDecision UbPfcDynamicDecisionHook::Evaluate(Ptr<UbQueueManager> queueManager,
+                                                 uint32_t inPort,
+                                                 uint32_t priority) const
+{
+    auto queueOcc = queueManager->GetIngressQueueOccupancy(inPort, priority);
+    auto switchOcc = queueManager->GetSwitchBufferOccupancy();
+    const uint64_t xoff = queueManager->GetDynamicPauseThresholdBytes();
+    const uint64_t xon = queueManager->GetDynamicResumeThresholdBytes();
+    const bool pause = queueOcc.headroom_bytes > 0 || (queueOcc.shared_bytes >= xoff && queueOcc.shared_bytes > 0);
+    return {
+        .pause = pause,
+        .resume = !pause && queueOcc.shared_bytes <= xon,
+        .ingress_total_bytes = queueOcc.total_bytes,
+        .ingress_shared_bytes = queueOcc.shared_bytes,
+        .ingress_headroom_bytes = queueOcc.headroom_bytes,
+        .switch_shared_pool_used_bytes = switchOcc.shared_pool_used_bytes,
+        .switch_total_buffered_bytes = switchOcc.total_buffered_bytes,
+        .xoff_threshold_bytes = xoff,
+        .xon_threshold_bytes = xon,
+    };
+}
+
+TypeId UbPfcPaperDynamicDecisionHook::GetTypeId(void)
+{
+    static TypeId tid = TypeId("ns3::UbPfcPaperDynamicDecisionHook")
+        .SetParent<UbPfcDecisionHook>()
+        .AddConstructor<UbPfcPaperDynamicDecisionHook>();
+    return tid;
+}
+
+UbPfcDecision UbPfcPaperDynamicDecisionHook::Evaluate(Ptr<UbQueueManager> queueManager,
+                                                      uint32_t inPort,
+                                                      uint32_t priority) const
+{
+    auto queueOcc = queueManager->GetIngressQueueOccupancy(inPort, priority);
+    auto switchOcc = queueManager->GetSwitchBufferOccupancy();
+    const uint64_t xoff = queueManager->GetPaperPauseThresholdBytes(switchOcc.total_buffered_bytes);
+    const uint64_t xon = queueManager->GetPaperResumeThresholdBytes(switchOcc.total_buffered_bytes);
+    const bool pause = queueOcc.headroom_bytes > 0 || (queueOcc.total_bytes >= xoff && queueOcc.total_bytes > 0);
+    return {
+        .pause = pause,
+        .resume = !pause && queueOcc.total_bytes <= xon,
+        .ingress_total_bytes = queueOcc.total_bytes,
+        .ingress_shared_bytes = queueOcc.shared_bytes,
+        .ingress_headroom_bytes = queueOcc.headroom_bytes,
+        .switch_shared_pool_used_bytes = switchOcc.shared_pool_used_bytes,
+        .switch_total_buffered_bytes = switchOcc.total_buffered_bytes,
+        .xoff_threshold_bytes = xoff,
+        .xon_threshold_bytes = xon,
+    };
+}
+
 TypeId UbCbfc::GetTypeId(void)
 {
-    static TypeId tid = TypeId("ns3::UbCbfc").SetParent<UbFlowControl>().AddConstructor<UbCbfc>();
+    static TypeId tid =
+        TypeId("ns3::UbCbfc")
+            .SetParent<UbFlowControl>()
+            .AddConstructor<UbCbfc>()
+            .AddTraceSource("ControlCreditRestoreNotify",
+                            "Observed restored control credits at the real flow-control receive path.",
+                            MakeTraceSourceAccessor(&UbCbfc::m_traceControlCreditRestoreNotify),
+                            "ns3::UbCbfc::ControlCreditRestoreNotify");
     return tid;
 }
 
 void UbCbfc::Init(uint8_t flitLen, uint8_t nFlitPerCell, uint8_t retCellGrainDataPacket,
-                  uint8_t retCellGrainControlPacket, int32_t portTxfree,
+                  uint8_t retCellGrainControlPacket, int32_t portTxfree, int32_t ctrlCrdRtrThldCells,
                   uint32_t nodeId, uint32_t portId)
 {
     // 基础参数配置
-    m_cbfcCfg = new cbfcCfg_t;
-    m_cbfcCfg->m_flitLen = flitLen;
-    m_cbfcCfg->m_nFlitPerCell = nFlitPerCell;
-    m_cbfcCfg->m_retCellGrainDataPacket = retCellGrainDataPacket;
-    m_cbfcCfg->m_retCellGrainControlPacket = retCellGrainControlPacket;
+    m_cbfcCfg.m_flitLen = flitLen;
+    m_cbfcCfg.m_nFlitPerCell = nFlitPerCell;
+    m_cbfcCfg.m_retCellGrainDataPacket = retCellGrainDataPacket;
+    m_cbfcCfg.m_retCellGrainControlPacket = retCellGrainControlPacket;
+    m_cbfcCfg.m_ctrlCrdRtrThldCells = ctrlCrdRtrThldCells;
     IntegerValue val;
     g_ub_vl_num.GetValue(val);
     int ubVlNum = val.Get();
     m_crdTxfree.resize(ubVlNum, portTxfree);
     m_crdToReturn.resize(ubVlNum, 0);
+    m_creditBlockedLast.resize(ubVlNum, false);
     m_nodeId = nodeId;
     m_portId = portId;
-    NS_LOG_DEBUG("NodeId: " << m_nodeId << "PortId: " << m_portId << "Init Cbfc");
+    NS_LOG_DEBUG("NodeId: " << m_nodeId
+                 << " PortId: " << m_portId
+                 << " Init Cbfc"
+                 << " flitLen=" << static_cast<uint32_t>(m_cbfcCfg.m_flitLen)
+                 << " flitsPerCell=" << static_cast<uint32_t>(m_cbfcCfg.m_nFlitPerCell)
+                 << " retCellGrainData=" << static_cast<uint32_t>(m_cbfcCfg.m_retCellGrainDataPacket)
+                 << " retCellGrainCtrl=" << static_cast<uint32_t>(m_cbfcCfg.m_retCellGrainControlPacket)
+                 << " ctrlCrdRtrThld=" << m_cbfcCfg.m_ctrlCrdRtrThldCells
+                 << " initCreditPerVl=" << portTxfree);
 
-    NS_LOG_DEBUG("m_crdTxfree[*]: " << m_crdTxfree[0]);
+    NS_ABORT_MSG_IF(m_cbfcCfg.m_flitLen == 0 || m_cbfcCfg.m_nFlitPerCell == 0,
+                    "CBFC requires non-zero cell geometry (flitLen and nFlitPerCell)");
+    NS_ABORT_MSG_IF(m_cbfcCfg.m_retCellGrainDataPacket == 0 ||
+                        m_cbfcCfg.m_retCellGrainControlPacket == 0,
+                    "CBFC requires non-zero return grain for both data and control packets");
+    NS_ABORT_MSG_IF(!IsValidCbfcCellGrain(m_cbfcCfg.m_nFlitPerCell),
+                    "CBFC flits-per-cell must be one of {1,2,4,8,16,32,64,128}");
+    NS_ABORT_MSG_IF(!IsValidCbfcCellGrain(m_cbfcCfg.m_retCellGrainDataPacket),
+                    "CBFC data-packet credit grain must be one of {1,2,4,8,16,32,64,128}");
+    NS_ABORT_MSG_IF(!IsValidCbfcCellGrain(m_cbfcCfg.m_retCellGrainControlPacket),
+                    "CBFC control-packet credit grain must be one of {1,2,4,8,16,32,64,128}");
+    NS_ABORT_MSG_IF(m_cbfcCfg.m_ctrlCrdRtrThldCells <= 0,
+                    "CBFC requires a positive control-frame force threshold");
+    NS_ABORT_MSG_IF(portTxfree < 0,
+                    "CBFC requires non-negative initial transmit credit per VL");
+
+    if (portTxfree == 0)
+    {
+        NS_LOG_WARN("CBFC initial credit is zero on NodeId=" << m_nodeId
+                    << " PortId=" << m_portId
+                    << " initCreditPerVl=" << portTxfree);
+    }
 }
 
 void UbCbfc::DoDispose()
 {
     NS_LOG_FUNCTION(this);
-    delete m_cbfcCfg;
-
     Object::DoDispose();
 }
 
 bool UbCbfc::IsFcLimited(Ptr<UbIngressQueue> ingressQ)
 {
     uint32_t nextPktSize = 0;
+    const uint32_t priority = ingressQ->GetIngressPriority();
     if (ingressQ->GetIngressQueueType() == IngressQueueType::VOQ && ingressQ->IsControlFrame()) {
         NS_LOG_DEBUG("is crd pkt");
         return false;
@@ -62,53 +222,70 @@ bool UbCbfc::IsFcLimited(Ptr<UbIngressQueue> ingressQ)
     nextPktSize = ingressQ->GetNextPacketSize();
     NS_LOG_DEBUG("nextPktSize:" << nextPktSize);
 
-    int32_t consumeCellNum = ceil((float)nextPktSize / (m_cbfcCfg->m_flitLen * m_cbfcCfg->m_nFlitPerCell));
-    if (m_crdTxfree[ingressQ->GetIngressPriority()] < consumeCellNum) {
+    int32_t consumeCellNum = ceil((float)nextPktSize / (m_cbfcCfg.m_flitLen * m_cbfcCfg.m_nFlitPerCell));
+    const bool blocked = m_crdTxfree[priority] < consumeCellNum;
+    if (m_creditBlockedLast[priority] != blocked) {
+        utils::UbUtils::CbfcStateNotify(m_nodeId,
+                                        m_portId,
+                                        blocked ? "BLOCK" : "RESUME",
+                                        priority,
+                                        m_crdTxfree[priority],
+                                        nextPktSize);
+        m_creditBlockedLast[priority] = blocked;
+    }
+    if (blocked) {
         NS_LOG_INFO("Flow Control Credit Limited,outPort:{" << ingressQ->GetOutPortId() << "} VL:{"
-                                                            << ingressQ->GetIngressPriority() << "}");
-        NS_LOG_DEBUG("m_crdTxfree[ " << ingressQ->GetIngressPriority() << " ]: " << m_crdTxfree[ingressQ->GetIngressPriority()]
+                                                            << priority << "}");
+        NS_LOG_DEBUG("m_crdTxfree[ " << priority << " ]: " << m_crdTxfree[priority]
                                      << "is insufficient");
         return true;
     }
-    NS_LOG_DEBUG("m_crdTxfree[ " << ingressQ->GetIngressPriority() << " ]: " << m_crdTxfree[ingressQ->GetIngressPriority()]
+    NS_LOG_DEBUG("m_crdTxfree[ " << priority << " ]: " << m_crdTxfree[priority]
                                  << "is enough");
 
     return false;
 }
 
-void UbCbfc::HandleReleaseOccupiedFlowControl(Ptr<Packet> p, uint32_t inPortId, uint32_t outPortId)
+void UbCbfc::OnIngressReleased(const UbFlowControlEventContext& context)
 {
-    if (inPortId != outPortId) { // 转发的报文
-        Ptr<Packet> cbfcPkt = ReleaseOccupiedCrd(p, inPortId);
-        if (cbfcPkt != nullptr) {
-            SendCrdAck(cbfcPkt, inPortId);
-        }
+    if (context.inPortId != context.outPortId) { // 转发的报文
+        AccumulateReturnedCredit(context.packet, m_portId);
+        MaybeQueueControlReturn(m_portId);
     }
 }
 
-void UbCbfc::HandleSentPacket(Ptr<Packet> p, Ptr<UbIngressQueue> ingressQ)
+void UbCbfc::OnEgressEnqueued(const UbFlowControlEventContext& context)
 {
-    if (ingressQ->IsControlFrame()) {
+    if (context.ingressQueue->IsControlFrame()) {
         NS_LOG_DEBUG("is crd pkt");
         return;
     }
-    CbfcConsumeCrd(p); // 计算消耗的信用证
+    CbfcConsumeCrd(context.packet); // 计算消耗的信用证
+    TryAttachPiggybackCredit(context.packet);
 }
 
-void UbCbfc::HandleReceivedControlPacket(Ptr<Packet> p)
+void UbCbfc::OnControlFrameReceived(Ptr<Packet> p)
 {
     CbfcRestoreCrd(p);
 }
 
-void UbCbfc::HandleReceivedPacket(Ptr<Packet> p)
+void UbCbfc::OnDataPacketReceived(Ptr<Packet> p)
 {
-    Ptr<Node> node = NodeList::GetNode(m_nodeId);
-    Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(m_portId));
+    RestoreDataPacketCredit(p);
+}
 
-    Ptr<Packet> cbfcPkt = ReleaseOccupiedCrd(p, m_portId);
-    if (cbfcPkt != nullptr) {
-        SendCrdAck(cbfcPkt, m_portId);
-    }
+void
+UbCbfc::ControlCreditRestoreNotify(uint32_t nodeId,
+                                   uint32_t portId,
+                                   const std::vector<uint8_t>& credits)
+{
+    m_traceControlCreditRestoreNotify(nodeId, portId, credits);
+}
+
+void UbCbfc::OnIngressEnqueued(const UbFlowControlEventContext& context)
+{
+    AccumulateReturnedCredit(context.packet, m_portId);
+    MaybeQueueControlReturn(m_portId);
 }
 
 int32_t UbCbfc::GetCrdToReturn(uint8_t vlId)
@@ -151,10 +328,16 @@ bool UbCbfc::CbfcConsumeCrd(Ptr<Packet> p)
     UbDatalinkPacketHeader pktHeader;
     p->PeekHeader(pktHeader);
     uint8_t vlId = pktHeader.GetPacketVL();
-    int32_t consumeCellNum = ceil((float)(pktSize) / (m_cbfcCfg->m_flitLen * m_cbfcCfg->m_nFlitPerCell));
+    int32_t consumeCellNum = ceil((float)(pktSize) / (m_cbfcCfg.m_flitLen * m_cbfcCfg.m_nFlitPerCell));
     NS_LOG_DEBUG("befor consume, m_crdTxfree[ " << (uint32_t)vlId << " ]: " << m_crdTxfree[vlId]);
     if (m_crdTxfree[vlId] >= consumeCellNum) {
         m_crdTxfree[vlId] -= consumeCellNum;
+        utils::UbUtils::CbfcCreditLevelNotify(m_nodeId,
+                                              m_portId,
+                                              "CONSUME",
+                                              vlId,
+                                              m_crdTxfree[vlId],
+                                              -consumeCellNum);
         NS_LOG_DEBUG("left m_crdTxfree[ " << (uint32_t)vlId << " ]: " << m_crdTxfree[vlId]);
         return true;
     }
@@ -177,18 +360,33 @@ bool UbCbfc::CbfcRestoreCrd(Ptr<Packet> p)
     g_ub_vl_num.GetValue(val);
     int ubVlNum = val.Get();
 
+    std::vector<uint8_t> restoredCredits;
+    restoredCredits.reserve(ubVlNum);
     for (int index = 0; index < ubVlNum; index++) {
         NS_LOG_DEBUG("port m_credits[ " << (uint32_t)index << " ]: " << (uint32_t)port->m_credits[index]);
+        restoredCredits.push_back(port->m_credits[index]);
     }
 
     for (int index = 0; index < ubVlNum; index++) {
         if (port->m_credits[index] > 0) {
             resumeCellGrainNum = port->m_credits[index];
             NS_LOG_DEBUG("before resume m_crdTxfree[ " << (uint32_t)index << " ]: " << m_crdTxfree[index]);
-            m_crdTxfree[index] += resumeCellGrainNum * m_cbfcCfg->m_retCellGrainControlPacket;  // 粒度数量 * 粒度大小
+            m_crdTxfree[index] += resumeCellGrainNum * m_cbfcCfg.m_retCellGrainControlPacket;  // 粒度数量 * 粒度大小
+            utils::UbUtils::CbfcCreditLevelNotify(m_nodeId,
+                                                  m_portId,
+                                                  "RESTORE",
+                                                  index,
+                                                  m_crdTxfree[index],
+                                                  static_cast<int32_t>(resumeCellGrainNum * m_cbfcCfg.m_retCellGrainControlPacket));
             NS_LOG_DEBUG("left m_crdTxfree[ " << (uint32_t)index << " ]: " << m_crdTxfree[index]);
             ret = true;
         }
+    }
+
+    if (ret)
+    {
+        ControlCreditRestoreNotify(m_nodeId, m_portId, restoredCredits);
+        utils::UbUtils::CbfcCreditRestoreTraceNotify(m_nodeId, m_portId, restoredCredits);
     }
 
     Simulator::ScheduleNow(&UbPort::TriggerTransmit, port);
@@ -203,42 +401,57 @@ void UbCbfc::SendCrdAck(Ptr<Packet> cbfcPkt, uint32_t targetPortId)
     NS_LOG_DEBUG("send crd pkt");
 }
 
-Ptr<Packet> UbCbfc::ReleaseOccupiedCrd(Ptr<Packet> p, uint32_t targetPortId)
+void UbCbfc::AccumulateReturnedCredit(Ptr<Packet> p, uint32_t targetPortId)
+{
+    if (p != nullptr) {
+        uint32_t pktSize = p->GetSize();
+        Ptr<Node> node = NodeList::GetNode(m_nodeId);
+        Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(targetPortId));
+        UbDatalinkPacketHeader pktHeader;
+        p->PeekHeader(pktHeader);
+        uint8_t vlId = pktHeader.GetPacketVL();
+        NS_LOG_DEBUG("NodeId: " << node->GetId() << " PortId: " << port->GetIfIndex()
+                     << " vlId: " << (uint32_t)vlId << " pktSize: " << pktSize);
+
+        int32_t consumeCellNum = ceil((float)(pktSize) / (m_cbfcCfg.m_flitLen * m_cbfcCfg.m_nFlitPerCell));
+        SetCrdToReturn(vlId, consumeCellNum, port);
+    }
+}
+
+Ptr<Packet> UbCbfc::BuildControlReturnPacket(uint32_t targetPortId,
+                                             int32_t minPendingCells,
+                                             const std::string& reason)
 {
     Ptr<Node> node = NodeList::GetNode(m_nodeId);
-    
-    Ptr<Packet> cbfcPkt = nullptr;
-    bool shouldReturnCredit = false;
     Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(targetPortId));
-    uint32_t pktSize = p->GetSize();
-    UbDatalinkPacketHeader pktHeader;
-    p->PeekHeader(pktHeader);
-    uint8_t vlId = pktHeader.GetPacketVL();
-    NS_LOG_DEBUG("NodeId: " << node->GetId() << " PortId: " << port->GetIfIndex()
-                 << " vlId: " << (uint32_t)vlId << " pktSize: " << pktSize);
+    if (port == nullptr) {
+        return nullptr;
+    }
 
-    int32_t consumeCellNum = ceil((float)(pktSize) / (m_cbfcCfg->m_flitLen * m_cbfcCfg->m_nFlitPerCell));
-
-    auto flowControl = DynamicCast<UbCbfc>(port->m_flowControl);
-    flowControl->SetCrdToReturn(vlId, consumeCellNum, port);
     int32_t leftCrdToReturn = 0;
     int32_t crdSndGrains = 0;
+    bool shouldReturnCredit = false;
     port->ResetCredits();
-
     IntegerValue val;
     g_ub_vl_num.GetValue(val);
     int ubVlNum = val.Get();
+    std::vector<int32_t> pendingSnapshot;
+    pendingSnapshot.reserve(ubVlNum);
 
     for (int index = 0; index < ubVlNum; index++) {
-        leftCrdToReturn = flowControl->GetCrdToReturn(index);
-        if (leftCrdToReturn >= m_cbfcCfg->m_retCellGrainControlPacket) {
-            crdSndGrains = leftCrdToReturn / m_cbfcCfg->m_retCellGrainControlPacket;
+        leftCrdToReturn = GetCrdToReturn(index);
+        pendingSnapshot.push_back(leftCrdToReturn);
+        if (leftCrdToReturn >= minPendingCells) {
+            const int32_t pendingGrains = leftCrdToReturn / m_cbfcCfg.m_retCellGrainControlPacket;
+            crdSndGrains = std::min(pendingGrains, static_cast<int32_t>(kMaxCtrlCreditGrainsPerFrame));
             NS_LOG_DEBUG("index: " << (uint32_t)index << " m_cbfcCfg->m_retCellGrainControlPacket: "
-                         << (uint32_t)m_cbfcCfg->m_retCellGrainControlPacket
+                         << (uint32_t)m_cbfcCfg.m_retCellGrainControlPacket
                          << " crdSndGrains: " << crdSndGrains);
-            port->SetCredits(index, crdSndGrains);
-            flowControl->UpdateCrdToReturn(index, crdSndGrains * m_cbfcCfg->m_retCellGrainControlPacket, port);
-            shouldReturnCredit = true;
+            if (crdSndGrains > 0) {
+                port->SetCredits(index, static_cast<uint8_t>(crdSndGrains));
+                UpdateCrdToReturn(index, crdSndGrains * m_cbfcCfg.m_retCellGrainControlPacket, port);
+                shouldReturnCredit = true;
+            }
         }
     }
 
@@ -246,11 +459,137 @@ Ptr<Packet> UbCbfc::ReleaseOccupiedCrd(Ptr<Packet> p, uint32_t targetPortId)
         NS_LOG_DEBUG("SndCredits[ " << (uint32_t)index << " ]: " << (uint32_t)port->m_credits[index]);
     }
 
-    if (shouldReturnCredit) {
-        cbfcPkt = UbDataLink::GenControlCreditPacket(port->m_credits);
+    if (!shouldReturnCredit) {
+        return nullptr;
+    }
+    std::vector<uint8_t> sendCredits;
+    sendCredits.reserve(ubVlNum);
+    for (int index = 0; index < ubVlNum; ++index) {
+        sendCredits.push_back(port->m_credits[index]);
+    }
+    utils::UbUtils::CbfcControlSendNotify(
+        m_nodeId,
+        targetPortId,
+        reason,
+        m_cbfcCfg.m_ctrlCrdRtrThldCells,
+        minPendingCells,
+        pendingSnapshot,
+        sendCredits);
+    return UbDataLink::GenControlCreditPacket(port->m_credits);
+}
+
+Ptr<Packet>
+UbCbfc::MaybeBuildControlReturnPacket(uint32_t targetPortId)
+{
+    if (ShouldForceControlReturn()) {
+        return BuildControlReturnPacket(targetPortId,
+                                        m_cbfcCfg.m_retCellGrainControlPacket,
+                                        "force_threshold");
+    }
+    return nullptr;
+}
+
+uint8_t
+UbCbfc::SelectPiggybackCreditVl() const
+{
+    IntegerValue val;
+    g_ub_vl_num.GetValue(val);
+    const uint8_t ubVlNum = static_cast<uint8_t>(val.Get());
+
+    for (uint8_t offset = 1; offset <= ubVlNum; ++offset) {
+        uint8_t candidate = static_cast<uint8_t>((m_lastPiggybackVl + offset) % ubVlNum);
+        if (m_crdToReturn[candidate] >= m_cbfcCfg.m_retCellGrainDataPacket) {
+            return candidate;
+        }
+    }
+    return UB_PRIORITY_NUM_DEFAULT;
+}
+
+bool
+UbCbfc::TryAttachPiggybackCredit(Ptr<Packet> p)
+{
+    if (p == nullptr) {
+        return false;
     }
 
-    return cbfcPkt;
+    UbDatalinkPacketHeader header;
+    p->RemoveHeader(header);
+    if (header.GetCredit()) {
+        p->AddHeader(header);
+        return false;
+    }
+
+    const uint8_t targetVl = SelectPiggybackCreditVl();
+    if (targetVl >= UB_PRIORITY_NUM_DEFAULT) {
+        p->AddHeader(header);
+        return false;
+    }
+
+    header.SetCredit(true);
+    header.SetCreditTargetVL(targetVl);
+    p->AddHeader(header);
+    m_crdToReturn[targetVl] -= m_cbfcCfg.m_retCellGrainDataPacket;
+    m_lastPiggybackVl = targetVl;
+    return true;
+}
+
+bool
+UbCbfc::RestoreDataPacketCredit(Ptr<Packet> p)
+{
+    if (p == nullptr) {
+        return false;
+    }
+
+    Ptr<Node> node = NodeList::GetNode(m_nodeId);
+    Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(m_portId));
+
+    UbDatalinkPacketHeader header;
+    p->RemoveHeader(header);
+    if (!header.GetCredit()) {
+        p->AddHeader(header);
+        return false;
+    }
+
+    const uint8_t targetVl = header.GetCreditTargetVL();
+    const int32_t restoreCells = m_cbfcCfg.m_retCellGrainDataPacket;
+    m_crdTxfree[targetVl] += restoreCells;
+    utils::UbUtils::CbfcCreditLevelNotify(m_nodeId,
+                                          m_portId,
+                                          "RESTORE",
+                                          targetVl,
+                                          m_crdTxfree[targetVl],
+                                          restoreCells);
+
+    header.SetCredit(false);
+    header.SetCreditTargetVL(0);
+    p->AddHeader(header);
+    Simulator::ScheduleNow(&UbPort::TriggerTransmit, port);
+    return true;
+}
+
+bool
+UbCbfc::ShouldForceControlReturn() const
+{
+    for (int32_t pending : m_crdToReturn) {
+        if (pending >= m_cbfcCfg.m_ctrlCrdRtrThldCells) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void
+UbCbfc::MaybeQueueControlReturn(uint32_t targetPortId)
+{
+    if (!ShouldForceControlReturn()) {
+        return;
+    }
+    while (Ptr<Packet> cbfcPkt =
+               BuildControlReturnPacket(targetPortId,
+                                        m_cbfcCfg.m_retCellGrainControlPacket,
+                                        "force_threshold")) {
+        SendCrdAck(cbfcPkt, targetPortId);
+    }
 }
 
 FcType UbCbfc::GetFcType()
@@ -269,21 +608,34 @@ TypeId UbCbfcSharedCredit::GetTypeId(void)
 
 void UbCbfcSharedCredit::Init(uint8_t flitLen, uint8_t nFlitPerCell, uint8_t retCellGrainDataPacket,
                             uint8_t retCellGrainControlPacket, int32_t reservedPerVlCells,
+                            int32_t ctrlCrdRtrThldCells,
                             int32_t sharedInitCells, uint32_t nodeId, uint32_t portId)
 {
     UbCbfc::Init(flitLen, nFlitPerCell, retCellGrainDataPacket, retCellGrainControlPacket,
-                 reservedPerVlCells, nodeId, portId);
+                 reservedPerVlCells, ctrlCrdRtrThldCells, nodeId, portId);
 
     m_shareCrd = sharedInitCells;
     m_reservedPerVlCells = reservedPerVlCells;
 
-    NS_LOG_DEBUG("NodeId: " << m_nodeId << "PortId: " << m_portId << "Init CbfcSharedMode");
-    NS_LOG_DEBUG("m_shareCrd: " << m_shareCrd << " reservedPerVlCells: " << m_reservedPerVlCells);
+    NS_LOG_DEBUG("NodeId: " << m_nodeId
+                 << " PortId: " << m_portId
+                 << " Init CbfcSharedMode"
+                 << " reservedPerVlCells=" << m_reservedPerVlCells
+                 << " sharedInitCells=" << m_shareCrd);
+
+    NS_ABORT_MSG_IF(m_reservedPerVlCells < 0 || m_shareCrd < 0,
+                    "CBFC_SHARED requires non-negative reserved and shared initial credits");
+    if (m_reservedPerVlCells == 0 && m_shareCrd == 0)
+    {
+        NS_LOG_WARN("CBFC shared-credit configuration has zero total transmit credit on NodeId="
+                    << m_nodeId
+                    << " PortId=" << m_portId);
+    }
 }
 
 FcType UbCbfcSharedCredit::GetFcType()
 {
-    return FcType::CBFC_SHARED_CRD;
+    return FcType::CBFC_SHARED;
 }
 
 bool UbCbfcSharedCredit::IsFcLimited(Ptr<UbIngressQueue> ingressQ)
@@ -298,7 +650,7 @@ bool UbCbfcSharedCredit::IsFcLimited(Ptr<UbIngressQueue> ingressQ)
     NS_LOG_DEBUG("nextPktSize: " << nextPktSize);
 
     const int32_t consumeCellNum =
-        ceil((float)nextPktSize / (m_cbfcCfg->m_flitLen * m_cbfcCfg->m_nFlitPerCell));
+        ceil((float)nextPktSize / (m_cbfcCfg.m_flitLen * m_cbfcCfg.m_nFlitPerCell));
 
     const uint8_t vlId = ingressQ->GetIngressPriority();
     const int32_t totalAvail = m_shareCrd + m_crdTxfree[vlId];
@@ -316,18 +668,24 @@ bool UbCbfcSharedCredit::IsFcLimited(Ptr<UbIngressQueue> ingressQ)
     return false;
 }
 
-void UbCbfcSharedCredit::HandleSentPacket(Ptr<Packet> p, Ptr<UbIngressQueue> ingressQ)
+void UbCbfcSharedCredit::OnEgressEnqueued(const UbFlowControlEventContext& context)
 {
-    if (ingressQ->IsControlFrame()) {
+    if (context.ingressQueue->IsControlFrame()) {
         NS_LOG_DEBUG("is crd pkt");
         return;
     }
-    CbfcSharedConsumeCrd(p);
+    CbfcSharedConsumeCrd(context.packet);
+    TryAttachPiggybackCredit(context.packet);
 }
 
-void UbCbfcSharedCredit::HandleReceivedControlPacket(Ptr<Packet> p)
+void UbCbfcSharedCredit::OnControlFrameReceived(Ptr<Packet> p)
 {
     CbfcSharedRestoreCrd(p);
+}
+
+void UbCbfcSharedCredit::OnDataPacketReceived(Ptr<Packet> p)
+{
+    RestoreSharedDataPacketCredit(p);
 }
 
 // CBFC 信用共享模式：信用消耗（Consume）逻辑
@@ -345,7 +703,7 @@ bool UbCbfcSharedCredit::CbfcSharedConsumeCrd(Ptr<Packet> p)
     const uint8_t vlId = pktHeader.GetPacketVL();
 
     const int32_t consumeCellNum =
-        ceil((float)pktSize / (m_cbfcCfg->m_flitLen * m_cbfcCfg->m_nFlitPerCell));
+        ceil((float)pktSize / (m_cbfcCfg.m_flitLen * m_cbfcCfg.m_nFlitPerCell));
     
     NS_LOG_DEBUG("befor consume, m_shareCrd: " << m_shareCrd << " m_crdTxfree[ " << (uint32_t)vlId << " ]: " << m_crdTxfree[vlId]);
 
@@ -391,8 +749,11 @@ bool UbCbfcSharedCredit::CbfcSharedRestoreCrd(Ptr<Packet> p)
     g_ub_vl_num.GetValue(val);
     int ubVlNum = val.Get();
 
+    std::vector<uint8_t> restoredCredits;
+    restoredCredits.reserve(ubVlNum);
     for (int index = 0; index < ubVlNum; index++) {
         NS_LOG_DEBUG("port m_credits[ " << (uint32_t)index << " ]: " << (uint32_t)port->m_credits[index]);
+        restoredCredits.push_back(port->m_credits[index]);
     }
 
     int32_t totalReturned = 0;
@@ -400,7 +761,7 @@ bool UbCbfcSharedCredit::CbfcSharedRestoreCrd(Ptr<Packet> p)
     for (int index = 0; index < ubVlNum; index++) {
         if (port->m_credits[index] > 0) {
             resumeCellGrainNum = port->m_credits[index];
-            int32_t cells = resumeCellGrainNum * m_cbfcCfg->m_retCellGrainControlPacket;
+            int32_t cells = resumeCellGrainNum * m_cbfcCfg.m_retCellGrainControlPacket;
             totalReturned += cells;
         }
     }
@@ -426,14 +787,57 @@ bool UbCbfcSharedCredit::CbfcSharedRestoreCrd(Ptr<Packet> p)
         ret = true;
     }
 
+    if (ret)
+    {
+        ControlCreditRestoreNotify(m_nodeId, m_portId, restoredCredits);
+    }
+
     Simulator::ScheduleNow(&UbPort::TriggerTransmit, port);
     return ret;
 }
 
+bool
+UbCbfcSharedCredit::RestoreSharedDataPacketCredit(Ptr<Packet> p)
+{
+    if (p == nullptr) {
+        return false;
+    }
+
+    Ptr<Node> node = NodeList::GetNode(m_nodeId);
+    Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(m_portId));
+
+    UbDatalinkPacketHeader header;
+    p->RemoveHeader(header);
+    if (!header.GetCredit()) {
+        p->AddHeader(header);
+        return false;
+    }
+
+    m_shareCrd += m_cbfcCfg.m_retCellGrainDataPacket;
+    IntegerValue val;
+    g_ub_vl_num.GetValue(val);
+    const int ubVlNum = val.Get();
+    for (int vl = 0; vl < ubVlNum && m_shareCrd > 0; ++vl) {
+        if (m_crdTxfree[vl] < m_reservedPerVlCells) {
+            const int32_t need = m_reservedPerVlCells - m_crdTxfree[vl];
+            const int32_t grant = std::min<int32_t>(need, m_shareCrd);
+            m_crdTxfree[vl] += grant;
+            m_shareCrd -= grant;
+        }
+    }
+
+    header.SetCredit(false);
+    header.SetCreditTargetVL(0);
+    p->AddHeader(header);
+    Simulator::ScheduleNow(&UbPort::TriggerTransmit, port);
+    return true;
+}
 
 TypeId UbPfc::GetTypeId(void)
 {
-    static TypeId tid = TypeId("ns3::UbPfc").SetParent<UbFlowControl>().AddConstructor<UbPfc>();
+    static TypeId tid = TypeId("ns3::UbPfc")
+        .SetParent<UbFlowControl>()
+        .AddConstructor<UbPfc>();
     return tid;
 }
 
@@ -442,27 +846,101 @@ FcType UbPfc::GetFcType()
     return m_fcType;
 }
 
-void UbPfc::Init(int32_t portpfcUpThld, int32_t portpfcLowThld, uint32_t nodeId, uint32_t portId)
+void UbPfc::InitRuntimeState(FcType mode,
+                             int32_t portpfcUpThld,
+                             int32_t portpfcLowThld,
+                             uint32_t nodeId,
+                             uint32_t portId,
+                             uint32_t vlNum)
+{
+    m_pfcStatus = pfcStatus_t(vlNum);
+    m_pfcCfg.m_portpfcUpThld = portpfcUpThld;
+    m_pfcCfg.m_portpfcLowThld = portpfcLowThld;
+    m_nodeId = nodeId;
+    m_portId = portId;
+    m_fcType = mode;
+}
+
+void UbPfc::BindFixedDecisionHook()
+{
+    NS_ABORT_MSG_IF(m_pfcCfg.m_portpfcUpThld < 0 || m_pfcCfg.m_portpfcLowThld < 0,
+                    "PFC_FIXED requires non-negative hi/lo thresholds");
+    NS_ABORT_MSG_IF(m_pfcCfg.m_portpfcLowThld >= m_pfcCfg.m_portpfcUpThld,
+                    "PFC_FIXED requires PfcLowThld < PfcUpThld");
+    auto hook = CreateObject<UbPfcFixedDecisionHook>();
+    hook->Init(m_pfcCfg.m_portpfcUpThld, m_pfcCfg.m_portpfcLowThld);
+    m_decisionHook = hook;
+}
+
+void UbPfc::BindDynamicDecisionHook(Ptr<UbQueueManager> queueManager)
+{
+    const auto profile = queueManager->GetBufferProfileView();
+    NS_ABORT_MSG_IF(profile.shared_pool_bytes == 0,
+                    "PFC_DYNAMIC requires SharedPoolBytes > 0");
+    NS_ABORT_MSG_IF(profile.headroom_per_port_bytes == 0,
+                    "PFC_DYNAMIC requires HeadroomPerPortBytes > 0");
+    m_decisionHook = CreateObject<UbPfcDynamicDecisionHook>();
+}
+
+void UbPfc::BindPaperDynamicDecisionHook(Ptr<UbQueueManager> queueManager)
+{
+    const auto profile = queueManager->GetBufferProfileView();
+    NS_ABORT_MSG_IF(profile.shared_pool_bytes == 0,
+                    "PFC_DYNAMIC_PAPER requires SharedPoolBytes > 0");
+    m_decisionHook = CreateObject<UbPfcPaperDynamicDecisionHook>();
+}
+
+void UbPfc::BindDecisionHook(Ptr<UbQueueManager> queueManager)
+{
+    NS_ABORT_MSG_IF(m_fcType != FcType::PFC_FIXED && m_fcType != FcType::PFC_DYNAMIC &&
+                        m_fcType != FcType::PFC_DYNAMIC_PAPER,
+                    "UbPfc must be initialized with PFC_FIXED, PFC_DYNAMIC, or PFC_DYNAMIC_PAPER mode");
+
+    switch (m_fcType) {
+        case FcType::PFC_FIXED:
+            BindFixedDecisionHook();
+            break;
+        case FcType::PFC_DYNAMIC:
+            BindDynamicDecisionHook(queueManager);
+            break;
+        case FcType::PFC_DYNAMIC_PAPER:
+            BindPaperDynamicDecisionHook(queueManager);
+            break;
+        default:
+            NS_ABORT_MSG("Unsupported PFC mode in BindDecisionHook");
+    }
+}
+
+void UbPfc::Init(FcType mode,
+                 int32_t portpfcUpThld,
+                 int32_t portpfcLowThld,
+                 uint32_t nodeId,
+                 uint32_t portId)
 {
     IntegerValue val;
     g_ub_vl_num.GetValue(val);
-    int ubVlNum = val.Get();
+    const uint32_t ubVlNum = static_cast<uint32_t>(val.Get());
+    InitRuntimeState(mode, portpfcUpThld, portpfcLowThld, nodeId, portId, ubVlNum);
 
-    m_pfcCfg = new pfcCfg_t;
-    m_pfcStatus = new pfcStatus_t(ubVlNum);
-    m_pfcCfg->m_portpfcUpThld = portpfcUpThld;    // 0.3 * m_pfcPortTotThld
-    m_pfcCfg->m_portpfcLowThld = portpfcLowThld;  // 0.8 * m_portpfcUpThld
+    Ptr<Node> node = NodeList::GetNode(m_nodeId);
+    Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(m_portId));
+    auto queueManager = port->GetNode()->GetObject<UbSwitch>()->GetQueueManager();
 
-    m_nodeId = nodeId;
-    m_portId = portId;
-    NS_LOG_DEBUG("NodeId: " << m_nodeId << "PortId: " << m_portId << "Init Pfc");
+    NS_LOG_DEBUG("NodeId: " << m_nodeId
+                 << " PortId: " << m_portId
+                 << " Init Pfc mode="
+                 << (m_fcType == FcType::PFC_FIXED ? "PFC_FIXED"
+                     : (m_fcType == FcType::PFC_DYNAMIC ? "PFC_DYNAMIC" : "PFC_DYNAMIC_PAPER"))
+                 << " hi=" << m_pfcCfg.m_portpfcUpThld
+                 << " lo=" << m_pfcCfg.m_portpfcLowThld);
+
+    BindDecisionHook(queueManager);
 }
 
 void UbPfc::DoDispose()
 {
     NS_LOG_FUNCTION(this);
-    delete m_pfcCfg;
-    delete m_pfcStatus;
+    m_decisionHook = nullptr;
     Object::DoDispose();
 }
 
@@ -472,7 +950,7 @@ bool UbPfc::IsFcLimited(Ptr<UbIngressQueue> ingressQ)
         NS_LOG_DEBUG("is Pfc pkt");
         return false;
     }
-    if (m_pfcStatus->m_portCredits[ingressQ->GetIngressPriority()] == 0) {
+    if (m_pfcStatus.m_portCredits[ingressQ->GetIngressPriority()] == 0) {
         NS_LOG_INFO("Flow Control Pfc Limited! NodeId: " << m_nodeId << ",outPort:{" << ingressQ->GetOutPortId() << "} VL:{"
                     << ingressQ->GetIngressPriority() << "}");
         return true;  // 不允许发送
@@ -481,36 +959,31 @@ bool UbPfc::IsFcLimited(Ptr<UbIngressQueue> ingressQ)
     return false;
 }
 
-void UbPfc::HandleReleaseOccupiedFlowControl(Ptr<Packet> p, uint32_t inPortId, uint32_t outPortId)
+void UbPfc::OnIngressReleased(const UbFlowControlEventContext& context)
 {
-    if (inPortId != outPortId) { // 转发的报文
-        Ptr<Packet> pfcPkt = CheckPfcThreshold(p, inPortId);
+    if (context.inPortId != context.outPortId) { // 转发的报文
+        Ptr<Packet> pfcPkt = CheckPfcThreshold(context.packet, context.inPortId);
         if (pfcPkt != nullptr) {
-            SendPfc(pfcPkt, inPortId);
+            SendPfc(pfcPkt, context.inPortId);
         }
     }
 }
 
-void UbPfc::HandleSentPacket(Ptr<Packet> p, Ptr<UbIngressQueue> ingressQ)
+void UbPfc::OnEgressEnqueued(const UbFlowControlEventContext& context)
 {
-    // do nothing
 }
 
-void UbPfc::HandleReceivedControlPacket(Ptr<Packet> p)
+void UbPfc::OnControlFrameReceived(Ptr<Packet> p)
 {
     UpdatePfcStatus(p);
 }
 
-void UbPfc::HandleReceivedPacket(Ptr<Packet> p)
+void UbPfc::OnIngressEnqueued(const UbFlowControlEventContext& context)
 {
-    Ptr<Node> node = NodeList::GetNode(m_nodeId);
-    Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(m_portId));
-
-    Ptr<Packet> pfcPkt = CheckPfcThreshold(p, m_portId);
+    Ptr<Packet> pfcPkt = CheckPfcThreshold(context.packet, m_portId);
     if (pfcPkt != nullptr) {
         SendPfc(pfcPkt, m_portId);
     }
-    return;
 }
 
 bool UbPfc::UpdatePfcStatus(Ptr<Packet> p)
@@ -524,30 +997,30 @@ bool UbPfc::UpdatePfcStatus(Ptr<Packet> p)
     g_ub_vl_num.GetValue(val);
     int ubVlNum = val.Get();
     for (int index = 0; index < ubVlNum; index++) {
-        if (m_pfcStatus->m_portCredits[index] != port->m_credits[index]) {
-            m_pfcStatus->m_portCredits[index] = port->m_credits[index];
+        if (m_pfcStatus.m_portCredits[index] != port->m_credits[index]) {
+            m_pfcStatus.m_portCredits[index] = port->m_credits[index];
             ret = true;
         }
     }
 
     NS_LOG_DEBUG("Recv Pfc uid: " << p->GetUid() << " NodeId: " << port->GetNode()->GetId() << " PortId: "
                 << port->GetIfIndex() << " m_pfcStatus->m_portCredits:{"
-                << (uint32_t)m_pfcStatus->m_portCredits[0] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[1] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[2] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[3] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[4] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[5] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[6] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[7] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[8] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[9] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[10] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[11] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[12] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[13] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[14] << " "
-                << (uint32_t)m_pfcStatus->m_portCredits[15] << "}");
+                << (uint32_t)m_pfcStatus.m_portCredits[0] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[1] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[2] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[3] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[4] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[5] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[6] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[7] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[8] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[9] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[10] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[11] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[12] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[13] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[14] << " "
+                << (uint32_t)m_pfcStatus.m_portCredits[15] << "}");
 
     Simulator::ScheduleNow(&UbPort::TriggerTransmit, port);
 
@@ -561,8 +1034,8 @@ void UbPfc::SendPfc(Ptr<Packet> pfcPacket, uint32_t targetPortId)
     
     node->GetObject<UbSwitch>()->SendControlFrame(pfcPacket, targetPortId);
     
-    auto flowControl = DynamicCast<UbPfc>(port->m_flowControl);
-    flowControl->m_pfcStatus->m_pfcSndCnt++;
+    auto flowControl = DynamicCast<UbPfc>(port->GetFlowControl());
+    flowControl->m_pfcStatus.m_pfcSndCnt++;
 }
 
 Ptr<Packet> UbPfc::CheckPfcThreshold(Ptr<Packet> p, uint32_t portId)
@@ -572,50 +1045,74 @@ Ptr<Packet> UbPfc::CheckPfcThreshold(Ptr<Packet> p, uint32_t portId)
 
     Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(portId));
     NS_LOG_DEBUG("NodeId: " << node->GetId() << " PortId: " << portId);
-
-    uint32_t hi_thresh = m_pfcCfg->m_portpfcUpThld;
-    uint32_t lo_thresh = m_pfcCfg->m_portpfcLowThld;
-    auto flowControl = DynamicCast<UbPfc>(port->m_flowControl);
+    auto flowControl = DynamicCast<UbPfc>(port->GetFlowControl());
 
     IntegerValue val;
     g_ub_vl_num.GetValue(val);
     int ubVlNum = val.Get();
+
+    NS_ASSERT_MSG(flowControl->m_decisionHook != nullptr,
+                  "UbPfc must have a decision hook before threshold evaluation");
+
+    auto queueManager = node->GetObject<UbSwitch>()->GetQueueManager();
     for (int pri = 0; pri < ubVlNum; pri++) {
-        auto queueManager = node->GetObject<UbSwitch>()->GetQueueManager();
-        // 使用InPort视图检查入端口拥塞状态
-        uint64_t inPortBufUsed = queueManager->GetInPortBufferUsed(portId, pri);
-        
-        if (inPortBufUsed < lo_thresh) {
-            NS_LOG_DEBUG("InPortBuf[" << pri << "]: " << inPortBufUsed
-                         << " < lo_thresh: " << lo_thresh << " m_pfcSndCredits: "
-                         << (uint32_t)flowControl->m_pfcStatus->m_pfcSndCredits[pri]);
-            flowControl->m_pfcStatus->m_pfcSndCredits[pri] = UB_CREDIT_MAX_VALUE;
+        UbPfcDecision decision = flowControl->m_decisionHook->Evaluate(queueManager, portId, pri);
+        const uint8_t currentPauseState = decision.pause ? 1 : 0;
+
+        if (flowControl->m_fcType == FcType::PFC_DYNAMIC &&
+            flowControl->m_pfcStatus.m_pfcDynamicLastTracePause[pri] != currentPauseState) {
+            utils::UbUtils::PfcDynamicStateNotify(port->GetNode()->GetId(),
+                                                  portId,
+                                                  static_cast<uint32_t>(pri),
+                                                  decision.ingress_total_bytes,
+                                                  decision.ingress_shared_bytes,
+                                                  decision.ingress_headroom_bytes,
+                                                  decision.xoff_threshold_bytes,
+                                                  decision.xon_threshold_bytes,
+                                                  decision.pause);
+            flowControl->m_pfcStatus.m_pfcDynamicLastTracePause[pri] = currentPauseState;
         }
-        if (inPortBufUsed >= hi_thresh) {
-            NS_LOG_DEBUG("InPortBuf[" << pri << "]: " << inPortBufUsed
-                         << " >= hi_thresh: " << hi_thresh << " m_pfcSndCredits = 0");
-            flowControl->m_pfcStatus->m_pfcSndCredits[pri] = 0;
+
+        if (decision.pause) {
+            flowControl->m_pfcStatus.m_pfcSndCredits[pri] = 0;
+        } else if (decision.resume) {
+            flowControl->m_pfcStatus.m_pfcSndCredits[pri] = UB_CREDIT_MAX_VALUE;
         }
     }
 
-    if (flowControl->m_pfcStatus->m_pfcSndCredits == flowControl->m_pfcStatus->m_pfcLastSndCredits) {
+    if (flowControl->m_pfcStatus.m_pfcSndCredits == flowControl->m_pfcStatus.m_pfcLastSndCredits) {
         NS_LOG_DEBUG("State Preservation");
         return pfcPkt;
+    }
+    for (int pri = 0; pri < ubVlNum; pri++) {
+        if (flowControl->m_pfcStatus.m_pfcSndCredits[pri] ==
+            flowControl->m_pfcStatus.m_pfcLastSndCredits[pri]) {
+            continue;
+        }
+        const bool pause = flowControl->m_pfcStatus.m_pfcSndCredits[pri] == 0;
+        const uint64_t ingressBytes = queueManager != nullptr
+                                          ? queueManager->GetQueueIngressTotalBytes(portId, pri)
+                                          : 0;
+        UbUtils::PfcStateNotify(node->GetId(),
+                                portId,
+                                pause ? "PAUSE" : "RESUME",
+                                static_cast<uint32_t>(pri),
+                                ingressBytes);
     }
 
     port->ResetCredits();
     for (int pri = 0; pri < ubVlNum; pri++) {
-        if (flowControl->m_pfcStatus->m_pfcSndCredits[pri]) {
-            port->SetCredits(pri, flowControl->m_pfcStatus->m_pfcSndCredits[pri]);
+        if (flowControl->m_pfcStatus.m_pfcSndCredits[pri]) {
+            port->SetCredits(pri, flowControl->m_pfcStatus.m_pfcSndCredits[pri]);
         }
     }
 
     NS_LOG_DEBUG("m_pfcStatus->m_pfcSndCredits: ");
     for (int index = 0; index < ubVlNum; index++) {
-        NS_LOG_DEBUG((uint32_t)flowControl->m_pfcStatus->m_pfcSndCredits[index] << " ");
+        NS_LOG_DEBUG((uint32_t)flowControl->m_pfcStatus.m_pfcSndCredits[index] << " ");
     }
 
-    flowControl->m_pfcStatus->m_pfcLastSndCredits = flowControl->m_pfcStatus->m_pfcSndCredits;
+    flowControl->m_pfcStatus.m_pfcLastSndCredits = flowControl->m_pfcStatus.m_pfcSndCredits;
 
     NS_LOG_DEBUG("Port credits changed. NodeId: " << node->GetId() << " inPort:{" << portId
             << "} VL:{" << (uint32_t)port->m_credits[0] << " " << (uint32_t)port->m_credits[1] << " "
@@ -631,5 +1128,4 @@ Ptr<Packet> UbPfc::CheckPfcThreshold(Ptr<Packet> p, uint32_t portId)
 
     return pfcPkt;
 }
-
 }  // namespace ns3

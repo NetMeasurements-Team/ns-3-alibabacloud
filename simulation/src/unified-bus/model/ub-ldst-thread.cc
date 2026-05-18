@@ -31,13 +31,13 @@ TypeId UbLdstThread::GetTypeId(void)
                                           MakeUintegerAccessor(&UbLdstThread::m_loadOutstanding),
                                           MakeUintegerChecker<uint32_t>())
                             .AddAttribute("LoadResponseSize",
-                                          "The payload size for a LOAD response is calculated as 64B * (2^length).",
-                                          UintegerValue(3),
+                                          "LOAD response payload size in bytes; rounded to nearest 64B * 2^n at Init().",
+                                          UintegerValue(512),
                                           MakeUintegerAccessor(&UbLdstThread::m_loadRspSize),
                                           MakeUintegerChecker<uint32_t>(0, 8192))
                             .AddAttribute("StoreRequestSize",
-                                          "The payload size for a STORE request is calculated as 64B * (2^length).",
-                                          UintegerValue(3),
+                                          "STORE request payload size in bytes; rounded to nearest 64B * 2^n at Init().",
+                                          UintegerValue(512),
                                           MakeUintegerAccessor(&UbLdstThread::m_storeReqSize),
                                           MakeUintegerChecker<uint32_t>(0, 8192))
                             .AddAttribute("LoadRequestSize",

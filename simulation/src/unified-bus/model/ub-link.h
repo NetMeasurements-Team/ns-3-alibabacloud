@@ -50,7 +50,7 @@ public:
      * @brief Attach a given netdevice to this link
      * @param device pointer to the ubdevice to attach to the link
      */
-    void Attach(Ptr<UbPort> device);
+    virtual void Attach(Ptr<UbPort> device);
     
     /**
     * @brief Transmit a packet over this link (UbPort version)
@@ -60,6 +60,8 @@ public:
     * @returns true if successful (currently always true)
     */
     virtual bool TransmitStart(Ptr<Packet> p, Ptr<UbPort> src, Time txTime);
+
+    virtual bool IsRemote(void) const;
 
     /**
      * @brief Get number of devices on this link

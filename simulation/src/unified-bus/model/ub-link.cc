@@ -15,7 +15,7 @@ TypeId UbLink::GetTypeId(void)
             .SetGroupName("UnifiedBus")
             .AddConstructor<UbLink>()
             .AddAttribute("Delay",
-                          "Transmission delay through the channel",
+                          "Propagation delay of the point-to-point link.",
                           TimeValue(Seconds(0)),
                           MakeTimeAccessor(&UbLink::m_delay),
                           MakeTimeChecker());
@@ -101,6 +101,11 @@ Ptr<UbPort> UbLink::GetDestination(Ptr<UbPort> src) const
 {
     uint32_t wire = src == m_link[0].m_src ? 0 : 1;
     return m_link[wire].m_dst;
+}
+
+bool UbLink::IsRemote(void) const
+{
+    return false;
 }
 
 bool UbLink::IsInitialized(void) const

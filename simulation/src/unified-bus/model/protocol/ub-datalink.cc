@@ -53,6 +53,10 @@ Ptr<Packet> UbDataLink::GenControlCreditPacket(const uint8_t credits[16])
 void UbDataLink::GenPacketHeader(Ptr<Packet> p, bool credit, bool ack, uint8_t crdVl, uint8_t pktVl, bool mode,
                                  bool policy, UbDatalinkHeaderConfig config)
 {
+    NS_ABORT_MSG_IF(config != UbDatalinkHeaderConfig::CONTROL && pktVl == 0,
+                    "Unified-bus reserves priority 0 for locally generated control frames in the "
+                    "simulator model. Data packets must use priority 1..15.");
+
     UbDatalinkPacketHeader linkPacketHeader;
     linkPacketHeader.SetCredit(credit);             // 报文是否返回信用证
     linkPacketHeader.SetACK(ack);                   // 报文是否释放retry buffer空间

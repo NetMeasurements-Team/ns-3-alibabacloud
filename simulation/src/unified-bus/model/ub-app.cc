@@ -24,13 +24,13 @@ TypeId UbApp::GetTypeId(void)
             .SetGroupName("UnifiedBus")
             .AddConstructor<UbApp>()
             .AddAttribute("EnableMultiPath",
-                          "Enable Multipath feature",
+                          "Enable multi-path transport: create TPs on multiple source ports toward the same destination.",
                           BooleanValue(false),
                           MakeBooleanAccessor(&UbApp::m_multiPathEnable),
                           MakeBooleanChecker())
             .AddAttribute("UseShortestPaths",
                           "If true, only create TPs on source ports that belong to shortest paths.",
-                          BooleanValue(false),
+                          BooleanValue(true),
                           MakeBooleanAccessor(&UbApp::m_useShortestPaths),
                           MakeBooleanChecker())
             .AddTraceSource("MemTaskStartsNotify",
@@ -100,7 +100,7 @@ void UbApp::SendTraffic(TrafficRecord record)
         std::vector<uint32_t> threadIds = {0, 1};
         ldstInstance->HandleLdstTask(record.sourceNode, record.destNode, record.dataSize,
                           record.taskId, record.priority, type, threadIds, 0);
-    } else if (record.opType == "URMA_WRITE") {
+    } else if (record.opType == "URMA_WRITE" || record.opType == "URMA_READ") {
         // URMA发送
         Ptr<UbFunction> ubFunc = GetNode()->GetObject<UbController>()->GetUbFunction();
         Ptr<UbTransaction> ubTa = GetNode()->GetObject<UbController>()->GetUbTransaction();
@@ -122,7 +122,10 @@ void UbApp::SendTraffic(TrafficRecord record)
             WqeTaskStartsNotify(GetNode()->GetId(), m_jettyNum, record.taskId);
             NS_LOG_INFO("[APPLICATION INFO] taskId: " << record.taskId << ",start time:" <<
                 Simulator::Now().GetNanoSeconds() << "ns");
-            Ptr<UbWqe> wqe = ubFunc->CreateWqe(record.sourceNode, record.destNode, record.dataSize, record.taskId);
+            NS_ASSERT_MSG(TaOpcodeMap.find(record.opType) != TaOpcodeMap.end(), "TaOpcode Not Exist");
+            TaOpcode type = TaOpcodeMap[record.opType];
+            Ptr<UbWqe> wqe =
+                ubFunc->CreateWqe(record.sourceNode, record.destNode, record.dataSize, record.taskId, type);
             ubFunc->PushWqeToJetty(wqe, m_jettyNum);
         }
         m_jettyNum++; // m_jettyNum 在client里是唯一的，不重复的
@@ -184,4 +187,3 @@ void UbApp::WqeTaskCompletesNotify(uint32_t nodeId, uint32_t jettyNum, uint32_t 
 }
 
 } // namespace ns3
-

@@ -134,6 +134,8 @@ public:
         return m_removeUselessTp;
     }
 private:
+    uint32_t ReserveNextTpnLocked();
+
     // 为指定节点建立各种索引
     void BuildIndexesForNode(uint32_t localNodeId, Connection conn);
 
@@ -171,6 +173,7 @@ private:
     std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, std::vector<Connection>> m_bothPortsIndex;
 
     std::set<uint32_t> m_tpnList;
+    std::set<uint32_t> m_reservedTpnList;
 
     uint32_t m_nextTpn = 0;
 
@@ -178,7 +181,7 @@ private:
 
     bool m_removeUselessTp = false;
 
-    std::mutex m_nextTpnLock;
+    mutable std::mutex m_stateLock;
 };
 
 } // namespace utils

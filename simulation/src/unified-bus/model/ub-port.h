@@ -55,6 +55,7 @@ public:
     explicit UbEgressQueue();
 
     bool DoEnqueue(PacketEntry packetEntry);  // 向端口eq塞入包
+    bool CanEnqueue(uint32_t packetBytes) const;
     PacketEntry Peekqueue(void);
     PacketEntry DoDequeue(void);
     // 为报文添加UDP、IPV4、DL packet头
@@ -94,6 +95,10 @@ public:
 
     void Receive(Ptr<Packet> p);
 
+    void EnableMpiReceive();
+
+    bool HasMpiReceive() const;
+
     bool Attach(Ptr<UbLink> ch);
 
     void NotifyLinkUp(void);
@@ -121,6 +126,7 @@ public:
     Ptr<Channel> GetChannel(void) const override;
 
     Ptr<UbEgressQueue> GetUbQueue();
+    bool EnqueueToEgress(PacketEntry packetEntry);
 
     uint64_t GetTxBytes();
 
@@ -209,6 +215,8 @@ private:
 
     bool m_linkUp;
 
+    bool m_mpiReceiveEnabled;
+
     Time m_tInterframeGap;
 
     Ptr<Packet> m_currentPkt;
@@ -230,6 +238,7 @@ private:
     uint8_t m_cbfcRetCellGrainControlPacket;    // 控制报文返回的CRD的粒度，通常从以下选项中选择 {1, 2, 4, 8, 16, 32, 64, 128}
     int32_t m_cbfcPortTxfree;
     int32_t m_cbfcSharedInitCells;
+    int32_t m_cbfcCtrlCrdRtrThldCells;
 
     // pfc
     int32_t m_pfcUpThld;

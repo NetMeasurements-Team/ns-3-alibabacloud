@@ -5,7 +5,7 @@
 #include <ns3/node.h>
 #include <set>
 #include <unordered_map>
-#include <bitset>
+#include "ns3/ub-sliding-bitmap-window.h"
 #include "ub-transport.h"
 #include "ns3/ub-datatype.h"
 #include "ns3/ub-network-address.h"
@@ -55,6 +55,12 @@ namespace ns3 {
          * @brief Assemble wqe
          * @param Client传入URMA任务
          */
+        Ptr<UbWqe> CreateWqe(uint32_t src,
+                             uint32_t dest,
+                             uint32_t size,
+                             uint32_t wqeId,
+                             TaOpcode type);
+
         Ptr<UbWqe> CreateWqe(uint32_t src, uint32_t dest, uint32_t size, uint32_t wqeId);
 
         /**
@@ -157,7 +163,8 @@ namespace ns3 {
 
         void ResetSsnAckBitset(uint32_t taOooAckThreshold)
         {
-            m_ssnAckBitset.resize(taOooAckThreshold, false);
+            m_ssnAckWindow.Resize(taOooAckThreshold);
+            m_ssnAckWindow.Reset(m_taSsnSndUna);
         }
 
         void SetClientCallback(Callback<void, uint32_t, uint32_t> cb);
@@ -192,7 +199,7 @@ namespace ns3 {
         uint32_t m_oooAckThreshold; // out of order ACK threshold
         uint32_t m_taSsnSndNxt = 0;                                 // TA层下一个待发送的分段序号
         uint32_t m_taSsnSndUna = 0;                                 // TA层未确认的最小分段序号
-        std::vector<bool> m_ssnAckBitset{std::vector<bool>(UB_JETTY_TASSN_OOO_THRESHOLD, false)}; // 接收维护的bitmap
+        UbSlidingBitmapWindow m_ssnAckWindow{UB_JETTY_TASSN_OOO_THRESHOLD}; // 接收维护的bitmap
         // 每个jetty统一编号，单调升，作为WqeSegment的编号统计
         //   |----ssn5----|------ssn4-------|------ssn3----->
         //   |----ssn2----|----ssn1---|---startssn0----->

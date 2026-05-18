@@ -5,14 +5,18 @@
 #include "ns3/ub-network-address.h"
 #include "ns3/ub-caqm.h"
 #include "ns3/ub-tag.h"
+#include "ns3/ub-utils.h"
+#ifdef NS3_MPI
+#include "ns3/mpi-receiver.h"
+#endif
 using namespace utils;
 
 namespace ns3 {
 NS_OBJECT_ENSURE_REGISTERED(UbPort);
 NS_LOG_COMPONENT_DEFINE("UbPort");
 
-constexpr long DEFAULT_PFC_UP_THLD = 1677721;
-constexpr long DEFAULT_PFC_LOW_THLD = 1342176;
+constexpr long DEFAULT_PFC_UP_THLD = 819200;   // 800KB ≈ 78% of 1MB per-queue reserve
+constexpr long DEFAULT_PFC_LOW_THLD = 655360;  // 640KB ≈ 80% of XOFF threshold
 
 /*********************
  * UbEgressQueue
@@ -56,6 +60,7 @@ bool UbEgressQueue::DoEnqueue(PacketEntry packetEntry)
 
     // Check byte limit
     if (m_currentBytes + pktSize > m_maxEgressBytes) {
+        UbUtils::RecordRuntimePacketDrop("egress queue buffer full");
         NS_LOG_WARN ("Buffer full, packet dropped: " 
                      << (m_currentBytes + pktSize) << " bytes > limit " << m_maxEgressBytes 
                      << " bytes. Packet dropped (inPort=" << inPortId 
@@ -65,10 +70,38 @@ bool UbEgressQueue::DoEnqueue(PacketEntry packetEntry)
     
     m_egressQ.push(packetEntry);
     m_currentBytes += pktSize;  // 更新字节统计
+    m_traceUbEnqueue(pkt, static_cast<uint32_t>(m_currentBytes));
 
     NS_LOG_LOGIC ("[UbEgressQueue DoEnqueue] Egress Queue size: " << m_egressQ.size () 
                   << " bytes: " << m_currentBytes << " (+" << pktSize << ")");
 
+    return true;
+}
+
+bool UbEgressQueue::CanEnqueue(uint32_t packetBytes) const
+{
+    return m_currentBytes + packetBytes <= m_maxEgressBytes;
+}
+
+bool
+UbPort::EnqueueToEgress(PacketEntry packetEntry)
+{
+    auto [inPortId, priority, packet] = packetEntry;
+    (void)inPortId;
+    (void)priority;
+    const uint32_t pktSize = packet->GetSize();
+
+    const bool enqueueOk = m_ubEQ->DoEnqueue(packetEntry);
+    if (!enqueueOk)
+    {
+        return false;
+    }
+
+    Ptr<UbSwitch> ubSwitch = GetNode()->GetObject<UbSwitch>();
+    if (ubSwitch != nullptr)
+    {
+        ubSwitch->GetQueueManager()->AddEgressBufferedBytes(pktSize);
+    }
     return true;
 }
 
@@ -98,6 +131,7 @@ PacketEntry UbEgressQueue::DoDequeue()
     auto [inPortId, priority, pkt] = packetEntry;
     uint32_t pktSize = pkt->GetSize();
     m_currentBytes -= pktSize;  // 更新字节统计
+    m_traceUbDequeue(pkt, static_cast<uint32_t>(m_currentBytes));
 
     NS_LOG_LOGIC ("[UbEgressQueue DoDequeue] Egress Queue size: " << m_egressQ.size ()
                   << " bytes: " << m_currentBytes << " (-" << pktSize << ")");
@@ -124,53 +158,66 @@ TypeId UbPort::GetTypeId(void)
             .SetParent<PointToPointNetDevice>()
             .AddConstructor<UbPort>()
             .AddAttribute("UbDataRate",
-                          "The default data rate for ub link",
+                          "Port data rate for Unified Bus link transmission.",
                           DataRateValue(DataRate ("400Gbps")),
                           MakeDataRateAccessor(&UbPort::m_bps),
                           MakeDataRateChecker())
             .AddAttribute("UbInterframeGap",
-                          "The time to wait between packet transmissions",
+                          "Minimum idle time inserted between consecutive packet transmissions.",
                           TimeValue(Seconds (0.0)),
                           MakeTimeAccessor(&UbPort::m_tInterframeGap),
                           MakeTimeChecker())
             .AddAttribute("CbfcFlitLenByte",
-                          "Cbfc flit len in Byte",
+                          "Flit size in bytes; the fixed-size data link layer transfer unit (Spec §1.6: 20 bytes).",
                           UintegerValue(20),
                           MakeUintegerAccessor(&UbPort::m_cbfcFlitLen),
                           MakeUintegerChecker<uint8_t>())
             .AddAttribute("CbfcFlitsPerCell",
-                          "Cbfc flits per cell",
-                          UintegerValue(4),
+                          "Number of flits per credit cell (Spec FLOW_CTRL_SIZE). "
+                          "Valid: {1,2,4,8,16,32,64,128}; spec default 8 = 160 bytes/cell.",
+                          UintegerValue(8),
                           MakeUintegerAccessor(&UbPort::m_cbfcFlitsPerCell),
                           MakeUintegerChecker<uint8_t>())
             .AddAttribute("CbfcRetCellGrainDataPacket",
-                          "Cbfc return cell grain data packet",
-                          UintegerValue(2),
+                          "Credit return granularity in DLLDP for data packets (Spec DATA_CREDIT_GRAIN_SIZE). "
+                          "Valid: {1,2,4,8,16,32,64,128} cells; spec default 4.",
+                          UintegerValue(4),
                           MakeUintegerAccessor(&UbPort::m_cbfcRetCellGrainDataPacket),
                           MakeUintegerChecker<uint8_t>())
             .AddAttribute("CbfcRetCellGrainControlPacket",
-                          "Cbfc return cell grain control packet",
-                          UintegerValue(2),
+                          "Credit return granularity in Crd_Ack Block for control packets "
+                          "(Spec CTRL_CREDIT_GRAIN_SIZE). Valid: {1,2,4,8,16,32,64,128} cells; "
+                          "repo default 32, spec default 1.",
+                          UintegerValue(32),
                           MakeUintegerAccessor(&UbPort::m_cbfcRetCellGrainControlPacket),
                           MakeUintegerChecker<uint8_t>())
             .AddAttribute("CbfcInitCreditCell",
-                          "According to the configuration of the receive buffer at the connected node port, "
-                          "the unit is cell",
-                          UintegerValue(1024),
+                          "Initial CBFC transmit credit in cells. In exclusive mode this equals "
+                          "floor(receive_buffer / cell_size); spec example: 1MB / 160B = 6553. "
+                          "In shared mode this is the per-VL reserved minimum and should be reduced.",
+                          IntegerValue(6553),
                           MakeIntegerAccessor(&UbPort::m_cbfcPortTxfree),
                           MakeIntegerChecker<int32_t>())
             .AddAttribute("CbfcSharedInitCreditCell",
-                          "Cbfc shared credit mode",
-                          UintegerValue(8192),
+                          "Shared credit pool size in cells for CBFC shared-credit mode. "
+                          "reserved + shared must not exceed per-VL buffer capacity in cells.",
+                          IntegerValue(4096),
                           MakeIntegerAccessor(&UbPort::m_cbfcSharedInitCells),
                           MakeIntegerChecker<int32_t>())
+            .AddAttribute("CbfcCtrlCrdRtrThldCell",
+                          "Per-VL pending returned-credit threshold in cells. Once a VL reaches this threshold, "
+                          "CBFC switches to control-frame credit return instead of waiting for piggyback opportunities. "
+                          "Repo default 1024 cells.",
+                          IntegerValue(1024),
+                          MakeIntegerAccessor(&UbPort::m_cbfcCtrlCrdRtrThldCells),
+                          MakeIntegerChecker<int32_t>(1))
             .AddAttribute("PfcUpThld",
-                          "Pfc up thld",
+                          "PFC XOFF threshold in bytes; a PAUSE frame is sent when the receive queue exceeds this level.",
                           IntegerValue(DEFAULT_PFC_UP_THLD),
                           MakeIntegerAccessor(&UbPort::m_pfcUpThld),
                           MakeIntegerChecker<int32_t>())
             .AddAttribute("PfcLowThld",
-                          "Pfc low thld",
+                          "PFC XON threshold in bytes; the PAUSE is released when the receive queue drains below this level.",
                           IntegerValue(DEFAULT_PFC_LOW_THLD),
                           MakeIntegerAccessor(&UbPort::m_pfcLowThld),
                           MakeIntegerChecker<int32_t>())
@@ -199,6 +246,7 @@ UbPort::UbPort()
     m_ubEQ = CreateObject<UbEgressQueue>();
     m_sendState = SendState::READY;
     m_txBytes = 0;
+    m_mpiReceiveEnabled = false;
     BooleanValue val;
     if (GlobalValue::GetValueByNameFailSafe("UB_RECORD_PKT_TRACE", val)) {
         GlobalValue::GetValueByName("UB_RECORD_PKT_TRACE", val);
@@ -211,6 +259,35 @@ UbPort::UbPort()
 UbPort::~UbPort()
 {
     NS_LOG_FUNCTION(this);
+}
+
+void
+UbPort::EnableMpiReceive()
+{
+#ifdef NS3_MPI
+    if (m_mpiReceiveEnabled)
+    {
+        return;
+    }
+
+    Ptr<MpiReceiver> mpiReceiver = GetObject<MpiReceiver>();
+    if (mpiReceiver == nullptr)
+    {
+        mpiReceiver = CreateObject<MpiReceiver>();
+        AggregateObject(mpiReceiver);
+    }
+
+    mpiReceiver->SetReceiveCallback(MakeCallback(&UbPort::Receive, this));
+    m_mpiReceiveEnabled = true;
+#else
+    NS_LOG_WARN("EnableMpiReceive called without MPI support");
+#endif
+}
+
+bool
+UbPort::HasMpiReceive() const
+{
+    return m_mpiReceiveEnabled;
 }
 
 void UbPort::SetIfIndex(const uint32_t portId)
@@ -238,11 +315,12 @@ void UbPort::CreateAndInitFc(FcType type)
             } else {
                 auto flowControl = DynamicCast<UbCbfc>(m_flowControl);
                 flowControl->Init(m_cbfcFlitLen, m_cbfcFlitsPerCell, m_cbfcRetCellGrainDataPacket,
-                    m_cbfcRetCellGrainControlPacket, m_cbfcPortTxfree, GetNode()->GetId(), m_portId);
+                    m_cbfcRetCellGrainControlPacket, m_cbfcPortTxfree, m_cbfcCtrlCrdRtrThldCells,
+                    GetNode()->GetId(), m_portId);
                 NS_LOG_DEBUG("[UbPort CreateAndInitFc] flowControl Cbfc Init");
             }
             break;
-        case FcType::CBFC_SHARED_CRD:
+        case FcType::CBFC_SHARED:
             m_flowControl = CreateObject<UbCbfcSharedCredit>();
             if (m_flowControl == nullptr) {
                 NS_FATAL_ERROR("Failed to create UbCbfcSharedCredit object for port " << m_portId);
@@ -253,24 +331,31 @@ void UbPort::CreateAndInitFc(FcType type)
 
                 flowControl->Init(m_cbfcFlitLen, m_cbfcFlitsPerCell,
                                 m_cbfcRetCellGrainDataPacket, m_cbfcRetCellGrainControlPacket,
-                                reservedPerVlCells, sharedInitCells,
+                                reservedPerVlCells, m_cbfcCtrlCrdRtrThldCells, sharedInitCells,
                                 GetNode()->GetId(), m_portId);
 
                 NS_LOG_DEBUG("[UbPort CreateAndInitFc] flowControl CbfcSharedMode Init");
             }
             break;
-        case FcType::PFC:
+        case FcType::PFC_FIXED:
+        case FcType::PFC_DYNAMIC:
+        case FcType::PFC_DYNAMIC_PAPER:
             m_flowControl = CreateObject<UbPfc>();
             if (m_flowControl == nullptr) {
                 NS_FATAL_ERROR("Failed to create UbPfc object for port " << m_portId);
             } else {
                 auto flowControl = DynamicCast<UbPfc>(m_flowControl);
-                flowControl->Init(m_pfcUpThld, m_pfcLowThld, GetNode()->GetId(), m_portId);
+                flowControl->Init(type, m_pfcUpThld, m_pfcLowThld, GetNode()->GetId(), m_portId);
                 IntegerValue val;
                 g_ub_vl_num.GetValue(val);
                 int ubVlNum = val.Get();
                 m_revQueueSize.resize(ubVlNum, 0);
-                NS_LOG_DEBUG("[UbPort CreateAndInitFc] flowControl Pfc Init");
+                for (int pri = 0; pri < ubVlNum; ++pri) {
+                    // PFC starts from the link-up/resumed state. Keeping the local port-side
+                    // credit image explicit avoids empty-queue/xoff==0 cases looking paused.
+                    m_credits[pri] = UB_CREDIT_MAX_VALUE;
+                }
+                NS_LOG_DEBUG("[UbPort CreateAndInitFc] flowControl Pfc Init mode=" << static_cast<int>(type));
             }
             break;
         case FcType::NONE:
@@ -311,14 +396,20 @@ void UbPort::DequeuePacket(void)
     m_sendState = SendState::BUSY;
 
     auto [inPortId, priority, packet] = m_ubEQ->DoDequeue();
+    Ptr<UbSwitch> ubSwitch = GetNode()->GetObject<UbSwitch>();
+    if (ubSwitch != nullptr)
+    {
+        ubSwitch->GetQueueManager()->RemoveEgressBufferedBytes(packet->GetSize());
+    }
 
     m_currentPkt = packet;
     m_currentInPortId = inPortId;
     m_currentPriority = priority;
     if (m_ubEQ->IsEmpty()) {
         // Switch allocation when port sendding packet.
-        auto allocator = GetNode()->GetObject<UbSwitch>()->GetAllocator();
-        Simulator::ScheduleNow(&UbSwitchAllocator::TriggerAllocator, allocator, this);
+        if (ubSwitch != nullptr && ubSwitch->GetAllocator() != nullptr) {
+            Simulator::ScheduleNow(&UbSwitchAllocator::TriggerAllocator, ubSwitch->GetAllocator(), this);
+        }
     }
 
     if (!m_faultCallBack.IsNull()) {
@@ -386,6 +477,7 @@ void UbPort::Receive(Ptr<Packet> packet)
         packet->AddPacketTag(tag);
     }
     PortRxNotify(GetNode()->GetId(), m_portId, packet->GetSize());
+    PktRcvNotify(packet);
     GetNode()->GetObject<UbSwitch>()->SwitchHandlePacket(this, packet);
 
     return;
@@ -454,7 +546,7 @@ void UbPort::AddIpv4Header(Ptr<Packet> p, Ipv4Address sIp, Ipv4Address dIp)
 
 void UbPort::AddNetHeader(Ptr<Packet> p)
 {
-    UbNetworkHeader netHeader;
+    UbIpBasedNetworkHeader netHeader;
     p->AddHeader(netHeader);
 }
 
@@ -477,13 +569,24 @@ void UbPort::TriggerTransmit()
         return;
     } // if link is down, return
     if (IsBusy()) {
+        if (m_ubEQ->IsEmpty()) {
+            Ptr<UbSwitch> ubSwitch = GetNode()->GetObject<UbSwitch>();
+            if (ubSwitch != nullptr && ubSwitch->GetAllocator() != nullptr) {
+                // Keep allocator prefetch alive while the current packet is still sending.
+                // This lets a late-arriving next packet hide AllocationTime behind the
+                // current serialization delay instead of always bubbling after tx-complete.
+                Simulator::ScheduleNow(&UbSwitchAllocator::TriggerAllocator, ubSwitch->GetAllocator(), this);
+            }
+        }
         NS_LOG_DEBUG("[UbPort TriggerTransmit] SendState::BUSY");
         return; // Quit if channel busy
     }
     if (m_ubEQ->IsEmpty()) {
         NS_LOG_DEBUG("[UbPort TriggerTransmit] trigger Allocator");
-        auto allocator = GetNode()->GetObject<UbSwitch>()->GetAllocator();
-        Simulator::ScheduleNow(&UbSwitchAllocator::TriggerAllocator, allocator, this);
+        Ptr<UbSwitch> ubSwitch = GetNode()->GetObject<UbSwitch>();
+        if (ubSwitch != nullptr && ubSwitch->GetAllocator() != nullptr) {
+            Simulator::ScheduleNow(&UbSwitchAllocator::TriggerAllocator, ubSwitch->GetAllocator(), this);
+        }
         return;
     }
     DequeuePacket();
@@ -567,11 +670,6 @@ void UbPort::SetDataRate(DataRate bps)
 {
     NS_LOG_DEBUG("port set data rate");
     m_bps = bps;
-    Ptr<UbCongestionControl> congestionCtrl = GetNode()->GetObject<UbSwitch>()->GetCongestionCtrl();
-    if (congestionCtrl->GetCongestionAlgo() == CAQM) {
-        Ptr<UbSwitchCaqm> caqmSw = DynamicCast<UbSwitchCaqm>(congestionCtrl);
-        caqmSw->SetDataRate(m_portId, bps);
-    }
 }
 
 void UbPort::IncreaseRcvQueueSize(Ptr<Packet> p, Ptr<UbPort> port)
@@ -631,6 +729,7 @@ void UbPort::DoDispose()
     m_currentPkt = nullptr;
     m_datalink = nullptr;
     m_flowControl = nullptr;
+    m_mpiReceiveEnabled = false;
     m_revQueueSize.clear();
     NetDevice::DoDispose();
 }

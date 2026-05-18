@@ -9,6 +9,10 @@
 #include "ub-app.h"
 #include "ub-utils.h"
 
+#ifdef NS3_MPI
+#include "ns3/mpi-interface.h"
+#endif
+
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE("UbTrafficGen");
@@ -31,8 +35,20 @@ UbTrafficGen::~UbTrafficGen()
 {
 }
 
+bool
+UbTrafficGen::IsMultiProcessRuntimeUnsupported()
+{
+#ifdef NS3_MPI
+    return MpiInterface::IsEnabled() && MpiInterface::GetSize() > 1;
+#else
+    return false;
+#endif
+}
+
 void UbTrafficGen::AddTask(TrafficRecord record)
 {
+    NS_ABORT_MSG_IF(IsMultiProcessRuntimeUnsupported(), GetMultiProcessUnsupportedMessage());
+    std::lock_guard<std::mutex> lock(m_mutex);
     uint32_t taskId = record.taskId;
     if (m_tasks.find(taskId) != m_tasks.end()) {
         NS_LOG_ERROR("TaskId " << taskId << " already exists, cannot add duplicate task!");
@@ -60,8 +76,17 @@ void UbTrafficGen::AddTask(TrafficRecord record)
     NS_LOG_DEBUG("Added task " << taskId << " with " << m_dependencies[taskId].size() << " dependencies");
 }
 
+void
+UbTrafficGen::SetPhaseDepend(uint32_t phaseId, uint32_t taskId)
+{
+    NS_ABORT_MSG_IF(IsMultiProcessRuntimeUnsupported(), GetMultiProcessUnsupportedMessage());
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_dependOnPhasesToTaskId[phaseId].insert(taskId);
+}
+
 TrafficRecord UbTrafficGen::GetTaskById(uint32_t taskId)
 {
+    std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_tasks.find(taskId);
     if (it != m_tasks.end()) {
         return it->second;
@@ -72,46 +97,52 @@ TrafficRecord UbTrafficGen::GetTaskById(uint32_t taskId)
 
 void UbTrafficGen::MarkTaskCompleted(uint32_t taskId)
 {
-    // 检查任务是否正在运行
-    if (m_taskStates[taskId] != TaskState::RUNNING) {
-        return;
-    }
+    std::vector<TrafficRecord> readyTasks;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
 
-    // 更新状态
-    m_taskStates[taskId] = TaskState::COMPLETED;
-    NS_LOG_DEBUG("Task " << taskId << " completed");
+        auto stateIt = m_taskStates.find(taskId);
+        if (stateIt == m_taskStates.end() || stateIt->second != TaskState::RUNNING) {
+            return;
+        }
 
-    // 检查依赖该任务的任务
-    auto dependentIt = m_dependents.find(taskId);
-    if (dependentIt != m_dependents.end()) {
-        for (uint32_t dependentId : dependentIt->second) {
-            // 只处理等待状态的任务
-            if (m_taskStates[dependentId] != TaskState::PENDING) {
-                continue;
-            }
+        stateIt->second = TaskState::COMPLETED;
+        NS_LOG_DEBUG("Task " << taskId << " completed");
 
-            // 检查该任务的所有依赖是否都已完成
-            bool allDepsCompleted = true;
-            auto depIt = m_dependencies.find(dependentId);
-            if (depIt != m_dependencies.end()) {
-                for (uint32_t depId : depIt->second) {
-                    if (m_taskStates[depId] != TaskState::COMPLETED) {
-                        allDepsCompleted = false;
-                        break;
+        auto dependentIt = m_dependents.find(taskId);
+        if (dependentIt != m_dependents.end()) {
+            for (uint32_t dependentId : dependentIt->second) {
+                auto dependentStateIt = m_taskStates.find(dependentId);
+                if (dependentStateIt == m_taskStates.end() ||
+                    dependentStateIt->second != TaskState::PENDING) {
+                    continue;
+                }
+
+                bool allDepsCompleted = true;
+                auto depIt = m_dependencies.find(dependentId);
+                if (depIt != m_dependencies.end()) {
+                    for (uint32_t depId : depIt->second) {
+                        auto depStateIt = m_taskStates.find(depId);
+                        if (depStateIt == m_taskStates.end() ||
+                            depStateIt->second != TaskState::COMPLETED) {
+                            allDepsCompleted = false;
+                            break;
+                        }
                     }
                 }
-            }
 
-            if (allDepsCompleted) {
-                m_taskStates[dependentId] = TaskState::READY;
-                m_readyTasks.insert(dependentId);
+                if (allDepsCompleted) {
+                    dependentStateIt->second = TaskState::READY;
+                    m_readyTasks.insert(dependentId);
+                }
             }
         }
+
+        readyTasks = CollectReadyTasksLocked();
     }
 
-    UbTrafficGen::Get()->ScheduleNextTasks();
+    ScheduleTasks(readyTasks);
 
-    // 检查是否全部完成
     if (IsCompleted()) {
         NS_LOG_DEBUG("[APPLICATION INFO] All tasks completed");
     }
@@ -119,6 +150,7 @@ void UbTrafficGen::MarkTaskCompleted(uint32_t taskId)
 
 bool UbTrafficGen::IsCompleted() const
 {
+    std::lock_guard<std::mutex> lock(m_mutex);
     for (const auto &statePair : m_taskStates)
         if (statePair.second != TaskState::COMPLETED) {
             return false;
@@ -127,30 +159,62 @@ bool UbTrafficGen::IsCompleted() const
     return true;
 }
 
+uint32_t UbTrafficGen::GetCompletedTaskCount() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    uint32_t completedTasks = 0;
+    for (const auto& statePair : m_taskStates)
+    {
+        if (statePair.second == TaskState::COMPLETED)
+        {
+            ++completedTasks;
+        }
+    }
+    return completedTasks;
+}
+
 void UbTrafficGen::ScheduleNextTasks()
 {
+    std::vector<TrafficRecord> readyTasks;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        readyTasks = CollectReadyTasksLocked();
+    }
+    ScheduleTasks(readyTasks);
+}
+
+std::vector<TrafficRecord> UbTrafficGen::CollectReadyTasksLocked()
+{
+    std::vector<TrafficRecord> readyTasks;
     for (auto it = m_readyTasks.begin(); it != m_readyTasks.end();) {
         uint32_t taskId = *it;
-        // 确认任务的就绪状态
-        if (m_taskStates[taskId] == TaskState::READY) {
-            m_taskStates[taskId] = TaskState::RUNNING;
-
+        auto stateIt = m_taskStates.find(taskId);
+        if (stateIt != m_taskStates.end() && stateIt->second == TaskState::READY) {
+            stateIt->second = TaskState::RUNNING;
             auto taskIt = m_tasks.find(taskId);
             if (taskIt != m_tasks.end()) {
-                if (taskIt->second.priority == 0) {
-                    NS_LOG_WARN("It is strongly recommended not to set the task priority to 0. " <<
-                                "Priority level 0 is reserved for control frames.");
-                }
-                auto app = DynamicCast<UbApp>(NodeList::GetNode(taskIt->second.sourceNode)->GetApplication(0));
-                Time taskDelay = Time(0);
-                if (!taskIt->second.delay.empty()) {
-                    taskDelay = Time(taskIt->second.delay);
-                }
-                Simulator::ScheduleWithContext(app->GetNode()->GetId(), taskDelay, &UbApp::SendTraffic, app, taskIt->second);
-                NS_LOG_DEBUG("Scheduled task " << taskId);
+                readyTasks.push_back(taskIt->second);
             }
         }
         it = m_readyTasks.erase(it);
+    }
+    return readyTasks;
+}
+
+void UbTrafficGen::ScheduleTasks(const std::vector<TrafficRecord>& tasks)
+{
+    for (const auto& task : tasks) {
+        if (task.priority == 0) {
+            NS_LOG_WARN("It is strongly recommended not to set the task priority to 0. " <<
+                        "Priority level 0 is reserved for control frames.");
+        }
+        auto app = DynamicCast<UbApp>(NodeList::GetNode(task.sourceNode)->GetApplication(0));
+        Time taskDelay = Time(0);
+        if (!task.delay.empty()) {
+            taskDelay = Time(task.delay);
+        }
+        Simulator::ScheduleWithContext(app->GetNode()->GetId(), taskDelay, &UbApp::SendTraffic, app, task);
+        NS_LOG_DEBUG("Scheduled task " << task.taskId);
     }
 }
 

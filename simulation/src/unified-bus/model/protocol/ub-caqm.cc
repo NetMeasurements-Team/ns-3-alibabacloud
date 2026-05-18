@@ -37,42 +37,42 @@ TypeId UbCaqm::GetTypeId(void)
             .SetParent<ns3::UbCongestionControl>()
             .AddConstructor<UbCaqm>()
             .AddAttribute("UbCaqmAlpha",
-                          "α, caqm window increase coefficient",
+                          "CAQM alpha: additive window increase coefficient (cwnd += alpha/cwnd * MTU per ACK).",
                           DoubleValue(0.5),
                           MakeDoubleAccessor(&UbCaqm::m_alpha),
                           MakeDoubleChecker<double>(0.0, 1.0))
             .AddAttribute("UbCaqmBeta",
-                          "β, caqm window decrease coefficient",
+                          "CAQM beta: multiplicative window decrease factor (cwnd -= CE * beta * MTU).",
                           DoubleValue(0.5),
                           MakeDoubleAccessor(&UbCaqm::m_beta),
                           MakeDoubleChecker<double>(0.0, 1.0))
             .AddAttribute("UbCaqmGamma",
-                          "γ, window low limit coefficient",
+                          "CAQM gamma: minimum congestion window floor coefficient (cwnd >= gamma * MTU).",
                           DoubleValue(0.5),
                           MakeDoubleAccessor(&UbCaqm::m_gamma),
                           MakeDoubleChecker<double>(0.0, 1.0))
             .AddAttribute("UbCaqmLambda",
-                          "λ, switch cc calculate coefficient",
+                          "CAQM lambda: switch-side credit counter EWMA smoothing coefficient.",
                           DoubleValue(0.5),
                           MakeDoubleAccessor(&UbCaqm::m_lambda),
                           MakeDoubleChecker<double>(0.0, 1.0))
             .AddAttribute("UbCaqmTheta",
-                          "θ, state reset time coefficient",
+                          "CAQM theta: idle RTT multiplier before resetting to slow-start (reset after theta * RTT).",
                           UintegerValue(10),
                           MakeUintegerAccessor(&UbCaqm::m_theta),
                           MakeUintegerChecker<uint32_t>())
             .AddAttribute("UbCaqmQt",
-                          "Qt, ideal max queue size in switch",
+                          "CAQM Qt: target queue depth in bytes at which the switch begins marking packets.",
                           UintegerValue(10 * UB_MTU_BYTE),
                           MakeUintegerAccessor(&UbCaqm::m_idealQueueSize),
                           MakeUintegerChecker<uint32_t>())
             .AddAttribute("UbCaqmCcUint",
-                          "ccUnit, the number of bytes represented by one cc",
+                          "CAQM CC unit: number of bytes represented by one credit-counter unit.",
                           UintegerValue(32),
                           MakeUintegerAccessor(&UbCaqm::m_ccUnit),
                           MakeUintegerChecker<uint32_t>())
             .AddAttribute("UbMarkProbability",
-                          "p, a packet marked probability",
+                          "CAQM marking probability for setting the congestion bit when CC > 0 but insufficient.",
                           DoubleValue(0.1),
                           MakeDoubleAccessor(&UbCaqm::m_markProbability),
                           MakeDoubleChecker<double>(0.0, 1.0));
@@ -100,8 +100,13 @@ TypeId UbHostCaqm::GetTypeId(void)
         TypeId("ns3::UbHostCaqm")
             .SetParent<ns3::UbCaqm>()
             .AddConstructor<UbHostCaqm>()
+            .AddAttribute("RttEwmaGain",
+                          "EWMA gain used by host-side CAQM runtime RTT estimate.",
+                          DoubleValue(0.125),
+                          MakeDoubleAccessor(&UbHostCaqm::m_rttEwmaGain),
+                          MakeDoubleChecker<double>(0.0, 1.0))
             .AddAttribute("UbCaqmCwnd",
-                          "Initial congestion window",
+                          "Initial congestion window size in bytes for host-side CAQM.",
                           UintegerValue(10 * UB_MTU_BYTE),
                           MakeUintegerAccessor(&UbHostCaqm::m_cwnd),
                           MakeUintegerChecker<uint32_t>());
@@ -118,14 +123,34 @@ UbHostCaqm::~UbHostCaqm()
     NS_LOG_FUNCTION(this);
 }
 
-void UbHostCaqm::TpInit(Ptr<UbTransportChannel> tp)
+void UbHostCaqm::OnTpAttached(Ptr<UbTransportChannel> tp)
 {
     m_src = tp->GetSrc();
     m_dst = tp->GetDest();
     m_tpn = tp->GetTpn();
 }
 
-// 获取剩余窗口，CAQM LDCP需要
+void UbHostCaqm::UpdateRttEstimate(Time sample)
+{
+    if (sample <= NanoSeconds(0)) {
+        return;
+    }
+    if (m_rtt == NanoSeconds(0)) {
+        m_rtt = sample;
+        return;
+    }
+    const double currentNs = static_cast<double>(m_rtt.GetNanoSeconds());
+    const double sampleNs = static_cast<double>(sample.GetNanoSeconds());
+    const double ewmaNs = (1.0 - m_rttEwmaGain) * currentNs + m_rttEwmaGain * sampleNs;
+    m_rtt = NanoSeconds(static_cast<int64_t>(ewmaNs + 0.5));
+}
+
+void UbHostCaqm::ApplyRttSampleForTest(Time sample)
+{
+    UpdateRttEstimate(sample);
+}
+
+// 获取剩余窗口
 uint32_t UbHostCaqm::GetRestCwnd()
 {
     if (m_congestionCtrlEnabled) {
@@ -140,10 +165,17 @@ uint32_t UbHostCaqm::GetRestCwnd()
     }
 }
 
-// 发送端生成拥塞控制算法需要的header
-UbNetworkHeader UbHostCaqm::SenderGenNetworkHeader()
+bool UbHostCaqm::IsCcLimited(uint32_t bytes)
 {
-    UbNetworkHeader networkHeader;
+    if (!m_congestionCtrlEnabled) {
+        return false;
+    }
+    return GetRestCwnd() < bytes;
+}
+
+// 发送端生成拥塞控制算法需要的header字段
+void UbHostCaqm::OnSenderPrepareIpBasedNetworkHeader(UbIpBasedNetworkHeader& networkHeader)
+{
     if (m_congestionCtrlEnabled) {
         networkHeader.SetI(1);
         networkHeader.SetC(0);
@@ -181,11 +213,10 @@ UbNetworkHeader UbHostCaqm::SenderGenNetworkHeader()
         networkHeader.SetC(0);
         networkHeader.SetHint(0);
     }
-    return networkHeader;
 }
 
 // 发送端发包，更新数据
-void UbHostCaqm::SenderUpdateCongestionCtrlData(uint32_t psn, uint32_t size)
+void UbHostCaqm::OnSenderDataPacketSent(uint32_t psn, uint32_t size)
 {
     if (m_congestionCtrlEnabled) {
         // 记录包号对应的发送时间
@@ -206,7 +237,9 @@ void UbHostCaqm::SenderUpdateCongestionCtrlData(uint32_t psn, uint32_t size)
 }
 
 // 接收端接到数据包后记录数据
-void UbHostCaqm::RecverRecordPacketData(uint32_t psn, uint32_t size, UbNetworkHeader header)
+void UbHostCaqm::OnReceiverDataPacketReceived(uint32_t psn,
+                                              uint32_t size,
+                                              UbIpBasedNetworkHeader header)
 {
     if (m_congestionCtrlEnabled) {
         m_recvdPsnPacketSizeMap[psn] = size; // 记录包号对应包的size, C, I, Hint
@@ -230,7 +263,8 @@ void UbHostCaqm::RecverRecordPacketData(uint32_t psn, uint32_t size, UbNetworkHe
 }
 
 // 接收端生成拥塞控制算法需要的ack header
-UbCongestionExtTph UbHostCaqm::RecverGenAckCeTphHeader(uint32_t psnStart, uint32_t psnEnd)
+UbCongestionExtTph UbHostCaqm::OnReceiverPrepareAckCongestionHeader(uint32_t psnStart,
+                                                                    uint32_t psnEnd)
 {
     UbCongestionExtTph cetph;
     if (m_congestionCtrlEnabled) {
@@ -269,6 +303,7 @@ UbCongestionExtTph UbHostCaqm::RecverGenAckCeTphHeader(uint32_t psnStart, uint32
         cetph.SetC(m_CE);
         cetph.SetI(m_IE);
         cetph.SetHint(m_HintE);
+        utils::UbUtils::CaqmAckNotify(m_src, m_tpn, psnStart, psnEnd, m_CE, m_IE, m_HintE);
         m_CE = 0;
         m_IE = 0;
         m_HintE = 0;
@@ -283,11 +318,17 @@ UbCongestionExtTph UbHostCaqm::RecverGenAckCeTphHeader(uint32_t psnStart, uint32
 }
 
 // 发送端收到ack，调整窗口、速率等数据
-void UbHostCaqm::SenderRecvAck(uint32_t psn, UbCongestionExtTph header)
+void UbHostCaqm::OnSenderCongestionNotification(TpOpcode opcode,
+                                                uint32_t psn,
+                                                UbCongestionExtTph header)
 {
+    if (opcode != TpOpcode::TP_OPCODE_ACK_WITH_CETPH) {
+        return;
+    }
     if (m_congestionCtrlEnabled) {
-        if (Simulator::Now() - m_psnSendTimeMap[psn] < m_rtt || m_rtt == NanoSeconds(0)) {
-            m_rtt = Simulator::Now() - m_psnSendTimeMap[psn];
+        const auto sentIt = m_psnSendTimeMap.find(psn);
+        if (sentIt != m_psnSendTimeMap.end()) {
+            UpdateRttEstimate(Simulator::Now() - sentIt->second);
         }
         uint32_t sequence = header.GetAckSequence();
         if (sequence < m_lastSequence && m_lastSequence > DATA_BYTE_RECVD_RESET_NUM) {
@@ -312,6 +353,7 @@ void UbHostCaqm::SenderRecvAck(uint32_t psn, UbCongestionExtTph header)
                   << " C_E:" << (int)c_e
                   << " I_E:" << (int)i_e
                   << " Hint_e:" << (int)hint);
+        utils::UbUtils::CaqmSenderStateNotify(m_src, m_tpn, psn, sequence, m_inFlight, m_cwnd, c_e, i_e, hint);
         // 收到拥塞或者拒绝增窗反馈，切换至拥塞避免阶段。
         // 同时重启定时器，一段时间后若仍没有收到含有阻塞或拒绝增窗的ack，则切换到慢启动阶段，
         if (c_e > 0 || i_e == 0) {
@@ -417,7 +459,7 @@ TypeId UbSwitchCaqm::GetTypeId(void)
             .SetParent<ns3::UbCaqm>()
             .AddConstructor<UbSwitchCaqm>()
             .AddAttribute("UbCcUpdatePeriod",
-                          "Switch static cc update time",
+                          "Switch-side credit counter periodic update interval.",
                           TimeValue(NanoSeconds(500)),
                           MakeTimeAccessor(&UbSwitchCaqm::m_ccUpdatePeriod),
                           MakeTimeChecker());
@@ -425,8 +467,9 @@ TypeId UbSwitchCaqm::GetTypeId(void)
     return tid;
 }
 
-void UbSwitchCaqm::SwitchInit(Ptr<UbSwitch> sw)
+void UbSwitchCaqm::OnSwitchAttached(Ptr<UbSwitch> sw)
 {
+    UbCongestionControl::OnSwitchAttached(sw);
     auto node = sw->GetObject<Node>();
     m_nodeId = node->GetId();
     if (m_congestionCtrlEnabled) {
@@ -436,10 +479,8 @@ void UbSwitchCaqm::SwitchInit(Ptr<UbSwitch> sw)
             m_cc.push_back(0);
             m_DC.push_back(0);
             m_creditAllocated.push_back(0);
-            m_bps.push_back(DynamicCast<UbPort>(node->GetDevice(i))->GetDataRate());
         }
     }
-    sw->SetCongestionCtrl(this);
 }
 
 void UbSwitchCaqm::ResetLocalCc()
@@ -455,13 +496,14 @@ void UbSwitchCaqm::ResetLocalCc()
             // 加上EgressQueue的字节占用
             Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(portId));
             uint64_t egressUsed = port->GetUbQueue()->GetCurrentBytes();
+            const DataRate portRate = port->GetDataRate();
             
             // 总队列占用 = VOQ + EgressQueue
             uint64_t totalQueueSize = voqUsed + egressUsed;
             
             uint64_t cc = uint64_t(m_lambda *
                                 (m_ccUpdatePeriod.GetSeconds()
-                                * m_bps[portId].GetBitRate() / 8
+                                * portRate.GetBitRate() / 8
                                 - m_txSize[portId]
                                 + m_idealQueueSize
                                 - totalQueueSize
@@ -475,14 +517,7 @@ void UbSwitchCaqm::ResetLocalCc()
     }
 }
 
-void UbSwitchCaqm::SetDataRate(uint32_t portId, DataRate bps)
-{
-    if (m_congestionCtrlEnabled) {
-        m_bps[portId] = bps;
-    }
-}
-
-void UbSwitchCaqm::SwitchForwardPacket(uint32_t inPort, uint32_t outPort, Ptr<Packet> p)
+void UbSwitchCaqm::OnSwitchPostDequeue(uint32_t inPort, uint32_t outPort, Ptr<Packet> p)
 {
     if (m_congestionCtrlEnabled) {
         UbDatalinkHeader dlHeader;
@@ -516,7 +551,7 @@ void UbSwitchCaqm::SwitchForwardPacket(uint32_t inPort, uint32_t outPort, Ptr<Pa
                   << " Total queue:" << totalQueueSize
                   << " Txsize:" << m_txSize[outPort]);
         UbDatalinkPacketHeader dlPktHeader;
-        UbNetworkHeader netHeader;
+        UbIpBasedNetworkHeader netHeader;
         p->RemoveHeader(dlPktHeader);
         p->RemoveHeader(netHeader);
         uint8_t c = netHeader.GetC();
@@ -593,7 +628,6 @@ void UbSwitchCaqm::DoDispose()
     m_txSize.clear();
     m_DC.clear();
     m_creditAllocated.clear();
-    m_bps.clear();
     m_random = nullptr;
     Object::DoDispose();
 }

@@ -100,16 +100,38 @@ void UbFunction::DestroyJetty(uint32_t jettyNum)
     }
 }
 
-Ptr<UbWqe> UbFunction::CreateWqe(uint32_t src, uint32_t dest, uint32_t size, uint32_t wqeId)
+Ptr<UbWqe> UbFunction::CreateWqe(uint32_t src,
+                                 uint32_t dest,
+                                 uint32_t size,
+                                 uint32_t wqeId,
+                                 TaOpcode type)
 {
     NS_LOG_DEBUG(this);
     // 创建新的 WQE
     Ptr<UbWqe> ubWqe = CreateObject<UbWqe>();
     ubWqe->SetSrc(src);
     ubWqe->SetDest(dest);
+    ubWqe->SetType(type);
     ubWqe->SetSize(size);
     ubWqe->SetWqeId(wqeId);
+    ubWqe->SetSegmentKind(UbTransactionSegmentKind::REQUEST);
+    // These fields are undefined before the WQE is enqueued into a concrete Jetty.
+    ubWqe->SetOriginJettyNum(UINT32_MAX);
+    ubWqe->SetRequestTassn(UINT32_MAX);
+    ubWqe->SetRequestOpcode(type);
+    ubWqe->SetResponseBytes(type == TaOpcode::TA_OPCODE_READ ? size : 0);
+    ubWqe->SetRemoteAddress(0);
+    ubWqe->SetNeedsTransactionResponse(type == TaOpcode::TA_OPCODE_WRITE ||
+                                       type == TaOpcode::TA_OPCODE_READ);
+    ubWqe->SetLogicalBytes(size);
+    ubWqe->SetPayloadBytes(type == TaOpcode::TA_OPCODE_READ ? 0 : size);
+    ubWqe->SetCarrierBytes(type == TaOpcode::TA_OPCODE_READ ? ubWqe->GetTaSsnSize() : size);
     return ubWqe;
+}
+
+Ptr<UbWqe> UbFunction::CreateWqe(uint32_t src, uint32_t dest, uint32_t size, uint32_t wqeId)
+{
+    return CreateWqe(src, dest, size, wqeId, TaOpcode::TA_OPCODE_WRITE);
 }
 
 void UbFunction::PushWqeToJetty(Ptr<UbWqe> wqe, uint32_t jettyNum)
@@ -148,12 +170,12 @@ TypeId UbJetty::GetTypeId(void)
                         .SetParent<Object>()
                         .SetGroupName("UnifiedBus")
                         .AddAttribute("JettyOooAckThreshold",
-                                      "Jetty Out-of-Order Ack Threshold",
+                                      "Maximum out-of-order ACK window tracked per Jetty (TASSN bitmap size).",
                                       UintegerValue(2048),
                                       MakeUintegerAccessor(&UbJetty::m_oooAckThreshold),
                                       MakeUintegerChecker<uint32_t>())
                         .AddAttribute("UbInflightMax",
-                                      "jetty inflight max",
+                                      "Maximum number of in-flight WQE segments per Jetty before back-pressure.",
                                       UintegerValue(10000),
                                       MakeUintegerAccessor(&UbJetty::m_inflightMax),
                                       MakeUintegerChecker<uint32_t>());
@@ -275,6 +297,16 @@ Ptr<UbWqeSegment> UbJetty::GenWqeSegment(Ptr<UbWqe> wqe, uint32_t segmentSize)
     segment->SetJettyNum(wqe->GetJettyNum());
     segment->SetTaMsn(wqe->GetTaMsn());
     segment->SetTaSsn(m_taSsnSndNxt); // 使用当前的分段序号
+    segment->SetSegmentKind(wqe->GetSegmentKind());
+    segment->SetOriginJettyNum(wqe->GetOriginJettyNum());
+    segment->SetRequestTassn(wqe->GetRequestTassn());
+    segment->SetRequestOpcode(wqe->GetRequestOpcode());
+    segment->SetResponseBytes(wqe->GetResponseBytes());
+    segment->SetRemoteAddress(wqe->GetRemoteAddress());
+    segment->SetNeedsTransactionResponse(wqe->NeedsTransactionResponse());
+    segment->SetLogicalBytes(segmentSize);
+    segment->SetPayloadBytes(wqe->GetType() == TaOpcode::TA_OPCODE_READ ? 0 : segmentSize);
+    segment->SetCarrierBytes(wqe->GetType() == TaOpcode::TA_OPCODE_READ ? 1 : segmentSize);
 
     // TP layer information will be set during subsequent TP layer scheduling
 
@@ -294,6 +326,19 @@ void UbJetty::PushWqe(Ptr<UbWqe> ubWqe)
     ubWqe->SetTaSsnStart(m_taSsnCnt);
     uint64_t ssnSize = (ubWqe->GetSize() + UB_WQE_TA_SEGMENT_BYTE - 1) / UB_WQE_TA_SEGMENT_BYTE;
     ubWqe->SetTaSsnSize(ssnSize);
+    // Assign request identity only after Jetty binding is known.
+    ubWqe->SetSegmentKind(UbTransactionSegmentKind::REQUEST);
+    ubWqe->SetOriginJettyNum(m_jettyNum);
+    ubWqe->SetRequestTassn(ubWqe->GetTaSsnStart());
+    ubWqe->SetRequestOpcode(ubWqe->GetType());
+    ubWqe->SetResponseBytes(ubWqe->GetType() == TaOpcode::TA_OPCODE_READ ? ubWqe->GetSize() : 0);
+    ubWqe->SetRemoteAddress(0);
+    ubWqe->SetNeedsTransactionResponse(ubWqe->GetType() == TaOpcode::TA_OPCODE_WRITE ||
+                                       ubWqe->GetType() == TaOpcode::TA_OPCODE_READ);
+    ubWqe->SetLogicalBytes(ubWqe->GetSize());
+    ubWqe->SetPayloadBytes(ubWqe->GetType() == TaOpcode::TA_OPCODE_READ ? 0 : ubWqe->GetSize());
+    ubWqe->SetCarrierBytes(ubWqe->GetType() == TaOpcode::TA_OPCODE_READ ? ssnSize
+                                                                         : ubWqe->GetSize());
 
     // 更新 Jetty 的 MSN 和 SSN 计数器
     m_taMsnCnt++;
@@ -344,14 +389,15 @@ bool UbJetty::ProcessWqeSegmentComplete(uint32_t taSsnAck)
     uint32_t bitIndex = taSsnAck - m_taSsnSndUna;
 
     // 检查是否超出 bitset 范围
-    if (bitIndex >= m_ssnAckBitset.size()) {
+    if (bitIndex >= m_ssnAckWindow.GetWindowSize()) {
         NS_LOG_ERROR("SSN " << std::to_string(taSsnAck)
                             << " exceeds bitset capacity, bitIndex=" << std::to_string(bitIndex));
         return false;
     }
 
     // 设置对应的 bit
-    m_ssnAckBitset[bitIndex] = true;
+    const bool marked = m_ssnAckWindow.Mark(taSsnAck);
+    NS_ASSERT_MSG(marked, "Valid SSN ACK should always fit inside ACK window");
 
     NS_LOG_DEBUG("Set ACK bit for SSN " << std::to_string(taSsnAck) << " at bit index "
                                        << std::to_string(bitIndex));
@@ -360,7 +406,8 @@ bool UbJetty::ProcessWqeSegmentComplete(uint32_t taSsnAck)
     uint32_t oldSndUna = m_taSsnSndUna;
     while (m_taSsnSndUna < m_taSsnSndNxt) {
         uint32_t currentBitIndex = m_taSsnSndUna - oldSndUna;
-        if (currentBitIndex < m_ssnAckBitset.size() && m_ssnAckBitset[currentBitIndex]) {
+        if (currentBitIndex < m_ssnAckWindow.GetWindowSize() &&
+            m_ssnAckWindow.Contains(m_taSsnSndUna)) {
             m_taSsnSndUna++;
         } else {
             break; // 遇到未确认的分段，停止
@@ -384,20 +431,8 @@ bool UbJetty::ProcessWqeSegmentComplete(uint32_t taSsnAck)
 
 void UbJetty::RightShiftBitset(uint32_t shiftCount)
 {
-    if (shiftCount >= m_ssnAckBitset.size()) {
-        std::fill(m_ssnAckBitset.begin(), m_ssnAckBitset.end(), false); // 清空所有位
-        return;
-    }
-
-    // 手动实现右移
-    for (size_t i = 0; i + shiftCount < m_ssnAckBitset.size(); ++i) {
-        m_ssnAckBitset[i] = m_ssnAckBitset[i + shiftCount];
-    }
-
-    // 清空右移后的高位
-    for (size_t i = m_ssnAckBitset.size() - shiftCount; i < m_ssnAckBitset.size(); ++i) {
-        m_ssnAckBitset[i] = 0;
-    }
+    (void)shiftCount;
+    m_ssnAckWindow.AdvanceContiguous();
 }
 
 void UbJetty::CheckAndRemoveCompletedWqe()
@@ -447,7 +482,7 @@ void UbJetty::DoDispose()
 {
     NS_LOG_FUNCTION(this);
     m_wqeVector.clear();
-    m_ssnAckBitset.clear();
+    m_ssnAckWindow.Resize(0);
     Object::DoDispose();
 }
 

@@ -2,6 +2,7 @@
 #ifndef UB_SWITCH_H
 #define UB_SWITCH_H
 
+#include <optional>
 #include <vector>
 #include <unordered_map>
 #include <queue>
@@ -21,8 +22,10 @@ class UbCongestionControl;
 
 enum FcType {
     CBFC,
-    CBFC_SHARED_CRD,
-    PFC,
+    CBFC_SHARED,
+    PFC_FIXED,
+    PFC_DYNAMIC,
+    PFC_DYNAMIC_PAPER,
     NONE  // No flow control
 };
 
@@ -45,7 +48,7 @@ typedef enum {
  */
 struct ParsedURMAHeaders {
     UbDatalinkPacketHeader datalinkPacketHeader;
-    UbNetworkHeader networkHeader;  // Must remove to access inner headers
+    UbIpBasedNetworkHeader networkHeader;  // Must remove to access inner headers
     Ipv4Header ipv4Header;
     UdpHeader udpHeader;
     UbTransportHeader transportHeader;
@@ -90,6 +93,7 @@ public:
     void SetPortsNum(uint32_t portsNum) {m_portsNum = portsNum;}
     void RegisterTpWithAllocator(Ptr<UbIngressQueue> tp, uint32_t outPort, uint32_t priority);
     void PushPacketToVoq(Ptr<Packet> p, uint32_t outPort, uint32_t priority, uint32_t inPort);
+    static bool IsValidVoqIndices(uint32_t outPort, uint32_t priority, uint32_t inPort, uint32_t portsNum, uint32_t vlNum);
     void RemoveTpFromAllocator(Ptr<UbIngressQueue> tp);
     Ptr<UbSwitchAllocator> GetAllocator();
     Ipv4Address GetNodeIpv4Addr(){return m_Ipv4Addr;}
@@ -98,6 +102,19 @@ public:
     bool IsCBFCSharedEnable();
     bool IsPFCEnable();
 
+    // Internal/runtime override entry. Current user-facing configuration still comes from
+    // network_attribute.txt via ConfigStore; these setters exist for tests and future bridge code.
+    void SetReservePerQueueBytes(uint32_t bytes);
+    void SetSharedPoolBytes(uint64_t bytes);
+    void SetHeadroomPerPortBytes(uint32_t bytes);
+    void SetDynamicPfcResumeGapBytes(uint32_t bytes);
+    void SetDynamicThresholdAlphaShift(uint32_t shift);
+    void SetPaperDynamicPfcBeta(uint32_t beta);
+    void SetPfcThresholds(int32_t xoffBytes, int32_t xonBytes);
+    void SetCbfcCellGeometry(uint8_t flitLenBytes, uint8_t flitsPerCell);
+    void SetCbfcReturnCellGrain(uint8_t dataPacketCells, uint8_t controlPacketCells);
+    void SetCbfcCredits(int32_t initCreditCells, int32_t sharedInitCreditCells);
+
     void SetCongestionCtrl(Ptr<UbCongestionControl> congestionCtrl);
     Ptr<UbCongestionControl> GetCongestionCtrl();
     Ptr<UbQueueManager> GetQueueManager();    // Queue Manage Unit
@@ -105,6 +122,25 @@ public:
     void SendControlFrame(Ptr<Packet> packet, uint32_t portId);
 
 private:
+    struct BufferOverrideConfig {
+        std::optional<uint32_t> reservePerQueueBytes;
+        std::optional<uint64_t> sharedPoolBytes;
+        std::optional<uint32_t> headroomPerPortBytes;
+        std::optional<uint32_t> dynamicPfcResumeGapBytes;
+        std::optional<uint32_t> dynamicThresholdAlphaShift;
+        std::optional<uint32_t> paperDynamicPfcBeta;
+    };
+
+    struct FlowControlOverrideConfig {
+        std::optional<int32_t> pfcXoffBytes;
+        std::optional<int32_t> pfcXonBytes;
+        std::optional<uint8_t> cbfcFlitLenBytes;
+        std::optional<uint8_t> cbfcFlitsPerCell;
+        std::optional<uint8_t> cbfcReturnGrainDataCells;
+        std::optional<uint8_t> cbfcReturnGrainControlCells;
+        std::optional<int32_t> cbfcInitCreditCells;
+        std::optional<int32_t> cbfcSharedInitCreditCells;
+    };
 
     TracedCallback<uint32_t, UbTransportHeader> m_traceLastPacketTraversesNotify;
 
@@ -115,7 +151,6 @@ private:
     void ReceivePacket(Ptr<UbPort> port, Ptr<Packet> p);
 
     UbPacketType_t GetPacketType(Ptr<Packet> packet);
-    void SinkControlFrame(Ptr<UbPort> port, Ptr<Packet> packet);
     void HandleURMADataPacket(Ptr<UbPort> port, Ptr<Packet> packet);
     void HandleLdstDataPacket(Ptr<UbPort> port, Ptr<Packet> packet);
     bool SinkTpDataPacket(Ptr<UbPort> port, Ptr<Packet> packet, const ParsedURMAHeaders &headers);
@@ -127,6 +162,11 @@ private:
     void ForwardDataPacket(Ptr<UbPort> port, Ptr<Packet> packet, const ParsedURMAHeaders &headers);
     void ForwardDataPacket(Ptr<UbPort> port, Ptr<Packet> packet, const ParsedLdstHeaders &headers);
     void ForceShortestPathRouting(Ptr<Packet> packet, const UbDatalinkPacketHeader &parsedHeader);
+    void InitAllocator(Ptr<Node> node);
+    void InitQueueManager(Ptr<Node> node);
+    void InitRoutingProcess(Ptr<Node> node);
+    void ApplyLocalQueueManagerConfig();
+    void ApplyLocalPortFlowControlConfig(Ptr<UbPort> port);
 
     Ptr<UbQueueManager> m_queueManager;   // Memory Management Unit
     Ptr<UbCongestionControl> m_congestionCtrl;
@@ -140,6 +180,8 @@ private:
     Ipv4Address m_Ipv4Addr;
     bool m_isECNEnable;
     FcType m_flowControlType { FcType::NONE };
+    BufferOverrideConfig m_bufferOverrides;
+    FlowControlOverrideConfig m_flowControlOverrides;
     enum VlScheduler {
         SP = 0,
         DWRR = 1

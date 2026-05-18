@@ -52,7 +52,7 @@ public:
         return tid;
     }
 
-    TypeId GetInstanceTypeId() const
+    TypeId GetInstanceTypeId() const override
     {
         return GetTypeId();
     }
@@ -216,7 +216,7 @@ public:
         return tid;
     }
 
-    TypeId GetInstanceTypeId() const
+    TypeId GetInstanceTypeId() const override
     {
         return GetTypeId();
     }

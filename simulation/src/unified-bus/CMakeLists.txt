@@ -4,14 +4,14 @@ set(mpi_libraries)
 
 if(${ENABLE_MPI})
   set(mpi_sources
-      # model/point-to-point-remote-channel.cc
+      model/ub-remote-link.cc
   )
   set(mpi_headers
-      # model/point-to-point-remote-channel.h
+      model/ub-remote-link.h
   )
   set(mpi_libraries
-      # ${libmpi}
-      # ${MPI_CXX_LIBRARIES}
+      ${libmpi}
+      MPI::MPI_CXX
   )
 endif()
 
@@ -27,6 +27,7 @@ build_lib(
 	model/protocol/ub-header.cc
 	model/ub-link.cc
 	model/ub-port.cc
+	model/ub-tag.cc
 	model/ub-switch.cc
 	model/protocol/ub-transaction.cc
 	model/protocol/ub-function.cc
@@ -39,10 +40,12 @@ build_lib(
 	model/ub-ldst-instance.cc
 	model/protocol/ub-congestion-control.cc
 	model/protocol/ub-caqm.cc
+	model/protocol/ub-dcqcn.cc
 	model/protocol/ub-flow-control.cc
 	model/ub-queue-manager.cc
 	model/ub-fault.cc
 	model/ub-tp-connection-manager.cc
+	model/ub-tag.cc
   HEADER_FILES
     ${mpi_headers}
 	model/ub-traffic-gen.h
@@ -53,6 +56,7 @@ build_lib(
 	model/protocol/ub-header.h
 	model/ub-link.h
 	model/ub-port.h
+	model/ub-sliding-bitmap-window.h
 	model/ub-switch.h
 	model/protocol/ub-transaction.h
 	model/protocol/ub-function.h
@@ -67,13 +71,15 @@ build_lib(
 	model/ub-ldst-instance.h
 	model/protocol/ub-congestion-control.h
 	model/protocol/ub-caqm.h
+	model/protocol/ub-dcqcn.h
 	model/protocol/ub-flow-control.h
 	model/ub-queue-manager.h
 	model/ub-tag.h
 	model/ub-fault.h
   LIBRARIES_TO_LINK ${libnetwork}
                     ${libinternet}
+                    ${libpoint-to-point}
+                    ${libconfig-store}
                     ${mpi_libraries}
   TEST_SOURCES test/ub-test.cc
 )
-

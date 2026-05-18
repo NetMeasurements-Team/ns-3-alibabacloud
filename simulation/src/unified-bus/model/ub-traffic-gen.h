@@ -5,6 +5,7 @@
 #include <vector>
 #include <unordered_map>
 #include <set>
+#include <mutex>
 #include "ns3/application.h"
 #include "ns3/event-id.h"
 #include "ns3/ptr.h"
@@ -38,13 +39,27 @@ public:
     UbTrafficGen();
     virtual ~UbTrafficGen();
 
+    static bool IsMultiProcessRuntimeUnsupported();
+
+    static inline std::string GetMultiProcessUnsupportedMessage()
+    {
+        return "UbTrafficGen does not support MPI multi-process usage in this branch. "
+               "Supported: unified-bus multi-process data path and UbTrafficGen multithreading. "
+               "Unsupported: distributed/operator-style synchronization via traffic.csv. "
+               "Use local quick-example runs or build distributed coordination separately.";
+    }
+
     void AddTask(TrafficRecord record);
+
+    void SetPhaseDepend(uint32_t phaseId, uint32_t taskId);
 
     TrafficRecord GetTaskById(uint32_t taskId);
 
     void MarkTaskCompleted(uint32_t taskId);
 
     bool IsCompleted() const;
+
+    uint32_t GetCompletedTaskCount() const;
 
     /**
      * @brief 任务完成回调
@@ -56,34 +71,33 @@ public:
      */
     void ScheduleNextTasks();
 
-    void SetPhaseDepend(uint32_t phaseId, uint32_t taskId)
-    {
-        m_dependOnPhasesToTaskId[phaseId].insert(taskId);
-    }
-
-    // ========== 数据成员 ==========
-    // 任务状态枚举
+  private:
     enum class TaskState {
-        PENDING,  // 等待依赖完成
-        READY,    // 就绪,可以调度
-        RUNNING,  // 正在执行
-        COMPLETED // 已完成
+        PENDING,
+        READY,
+        RUNNING,
+        COMPLETED
     };
 
     map<std::string, TaOpcode> TaOpcodeMap = {
         {"URMA_WRITE", TaOpcode::TA_OPCODE_WRITE},
+        {"URMA_READ", TaOpcode::TA_OPCODE_READ},
         {"MEM_STORE", TaOpcode::TA_OPCODE_WRITE},
         {"MEM_LOAD", TaOpcode::TA_OPCODE_READ}
     };
-    // DAG结构
+
     std::unordered_map<uint32_t, TrafficRecord> m_tasks{};
-    std::unordered_map<uint32_t, std::set<uint32_t>>
-        m_dependencies{}; // 每个任务ID对应其依赖的任务ID集合(即该任务必须等待这些任务完成)
-    std::unordered_map<uint32_t, std::set<uint32_t>>
-        m_dependents{}; // 每个任务ID对应所有依赖它的任务ID集合(即这些任务等待该任务完成)
+    std::unordered_map<uint32_t, std::set<uint32_t>> m_dependencies{};
+    std::unordered_map<uint32_t, std::set<uint32_t>> m_dependents{};
     std::unordered_map<uint32_t, TaskState> m_taskStates{};
     std::set<uint32_t> m_readyTasks{};
     std::map<uint32_t, set<uint32_t>> m_dependOnPhasesToTaskId{};
+
+    std::vector<TrafficRecord> CollectReadyTasksLocked();
+
+    void ScheduleTasks(const std::vector<TrafficRecord>& tasks);
+
+    mutable std::mutex m_mutex;
 };
 
 } // namespace ns3

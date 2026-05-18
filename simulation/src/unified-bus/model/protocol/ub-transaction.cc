@@ -182,6 +182,28 @@ void UbTransaction::ApplyScheduleWqeSegment(Ptr<UbTransportChannel> tp)
     Simulator::ScheduleNow(&UbTransaction::ScheduleWqeSegment, this, tp);
 }
 
+bool UbTransaction::IsUrmaReadWriteRequest(const Ptr<UbWqeSegment>& segment)
+{
+    if (segment == nullptr) {
+        return false;
+    }
+    if (segment->GetSegmentKind() != UbTransactionSegmentKind::REQUEST) {
+        return false;
+    }
+    return segment->GetType() == TaOpcode::TA_OPCODE_WRITE ||
+           segment->GetType() == TaOpcode::TA_OPCODE_READ;
+}
+
+void UbTransaction::ValidateUrmaServiceModeOrDie(uint32_t jettyNum, const Ptr<UbWqeSegment>& segment)
+{
+    if (!IsUrmaReadWriteRequest(segment)) {
+        return;
+    }
+    TransactionServiceMode mode = GetTransactionServiceMode(jettyNum);
+    NS_ABORT_MSG_IF(mode != TransactionServiceMode::ROI,
+                    "URMA read/write currently only supports ROI service mode.");
+}
+
 void UbTransaction::ScheduleWqeSegment(Ptr<UbTransportChannel> tp)
 {
     if (tp == nullptr) {
@@ -201,15 +223,15 @@ void UbTransaction::ScheduleWqeSegment(Ptr<UbTransportChannel> tp)
     m_tpSchedulingStatus[tpn] = true;
     // 找到tp相关的Jetty
     auto tpRelatedJetties = GetTpRelatedJettyVec(tpn);
-    std::map<uint32_t, std::vector<Ptr<UbWqeSegment>>> remoteRequestSegMap;
-    // 找到tp相关的remoteRequest
-    if (m_tpRelatedRemoteRequests.find(tpn) != m_tpRelatedRemoteRequests.end()) {
-        remoteRequestSegMap = m_tpRelatedRemoteRequests[tpn];
-    }
 
     // 记录开始轮询的位置， 避免无限循环
     uint32_t jettyCount = tpRelatedJetties.size();
-    uint32_t rrCount = jettyCount + remoteRequestSegMap.size();
+    uint32_t remoteRequestCount = 0;
+    auto remoteRequestMapIt = m_tpRelatedRemoteRequests.find(tpn);
+    if (remoteRequestMapIt != m_tpRelatedRemoteRequests.end()) {
+        remoteRequestCount = remoteRequestMapIt->second.size();
+    }
+    uint32_t rrCount = jettyCount + remoteRequestCount;
 
     // 该TP无对应jetty，不进行调度，状态重置
     if (rrCount == 0) {
@@ -226,10 +248,11 @@ void UbTransaction::ScheduleWqeSegment(Ptr<UbTransportChannel> tp)
         return;
     }
 
-    // tp的wqesegment队列长度大于2，不进行调度，状态重置
-    if (tp->GetWqeSegmentVecSize() > 1) {
-        NS_LOG_DEBUG("tp wqe segment vector size > 1");
+    // 浅流水限制的是仍可继续发送的活跃 segment，避免单个 jetty 预取过深。
+    if (tp->GetActiveSendSegmentCount() > 1) {
+        NS_LOG_DEBUG("tp active send segment count > 1");
         m_tpSchedulingStatus[tpn] = false;
+        return;
     }
     // m_tpRRIndex每次更新时都会进行取余操作，不会大于rrCount
     // 只有某个jetty完成后删除，导致rrCount变小时才会出现这种情况。此时重置轮询位置
@@ -251,24 +274,33 @@ void UbTransaction::ScheduleWqeSegment(Ptr<UbTransportChannel> tp)
             if (wqeSegment == nullptr) {
                 continue;
             }
+            ValidateUrmaServiceModeOrDie(currentJetty->GetJettyNum(), wqeSegment);
         } else { // 轮询remoteRequest
             uint32_t remoteIndex = rrIndex - jettyCount;
-            auto it = remoteRequestSegMap.begin();
-            std::advance(it, remoteIndex);
-            if (it->second.size() == 0) {
+            auto remoteIt = m_tpRelatedRemoteRequests.find(tpn);
+            if (remoteIt == m_tpRelatedRemoteRequests.end()) {
                 continue;
             }
-
-            for (auto vecIt = it->second.begin(); vecIt != it->second.end();) {
+            auto it = remoteIt->second.begin();
+            std::advance(it, remoteIndex);
+            if (it == remoteIt->second.end()) {
+                continue;
+            }
+            auto& remoteSegments = it->second;
+            for (auto vecIt = remoteSegments.begin(); vecIt != remoteSegments.end();) {
                 if (*vecIt == nullptr) {
-                    vecIt = it->second.erase(vecIt);
-                } else {
-                    wqeSegment = *vecIt;
-                    break;
+                    vecIt = remoteSegments.erase(vecIt);
+                    continue;
                 }
+                wqeSegment = *vecIt;
+                remoteSegments.erase(vecIt);
+                break;
             }
             if (wqeSegment == nullptr) {
                 continue;
+            }
+            if (remoteSegments.empty()) {
+                remoteIt->second.erase(it);
             }
         }
         if (wqeSegment != nullptr) {
@@ -303,8 +335,153 @@ void UbTransaction::OnScheduleWqeSegmentFinish(Ptr<UbWqeSegment> segment)
 
 bool UbTransaction::ProcessWqeSegmentComplete(Ptr<UbWqeSegment> wqeSegment)
 {
-    Ptr<UbJetty> jetty = GetJetty(wqeSegment->GetJettyNum());
-    return jetty->ProcessWqeSegmentComplete(wqeSegment->GetTaSsn());
+    if (wqeSegment == nullptr) {
+        return false;
+    }
+
+    uint32_t jettyNum = wqeSegment->GetJettyNum();
+    uint32_t taSsn = wqeSegment->GetTaSsn();
+    if (wqeSegment->GetSegmentKind() == UbTransactionSegmentKind::RESPONSE) {
+        jettyNum = wqeSegment->GetOriginJettyNum();
+        taSsn = wqeSegment->GetRequestTassn();
+    }
+
+    Ptr<UbJetty> jetty = GetJetty(jettyNum);
+    if (jetty == nullptr) {
+        return false;
+    }
+    return jetty->ProcessWqeSegmentComplete(taSsn);
+}
+
+void UbTransaction::HandleInboundTaUnit(uint32_t localTpn, Ptr<UbWqeSegment> segment)
+{
+    if (segment == nullptr) {
+        return;
+    }
+
+    if (segment->GetSegmentKind() == UbTransactionSegmentKind::RESPONSE) {
+        CompleteLocalRequestFromResponse(segment);
+        return;
+    }
+
+    Ptr<UbWqeSegment> response = nullptr;
+    if (segment->GetType() == TaOpcode::TA_OPCODE_WRITE) {
+        response = ExecuteRemoteWriteAndBuildAck(localTpn, segment);
+    } else if (segment->GetType() == TaOpcode::TA_OPCODE_READ) {
+        response = ExecuteRemoteReadAndBuildResponse(localTpn, segment);
+    } else {
+        return;
+    }
+
+    if (response == nullptr) {
+        return;
+    }
+
+    m_tpRelatedRemoteRequests[localTpn][response->GetOriginJettyNum()].push_back(response);
+    auto tpIt = m_tpnMap.find(localTpn);
+    if (tpIt != m_tpnMap.end()) {
+        ApplyScheduleWqeSegment(tpIt->second);
+    }
+}
+
+Ptr<UbWqeSegment> UbTransaction::ExecuteRemoteWriteAndBuildAck(uint32_t localTpn,
+                                                               Ptr<UbWqeSegment> request)
+{
+    if (request == nullptr) {
+        return nullptr;
+    }
+
+    const uint64_t address = DeriveRemoteAddress(request);
+    m_memoryStore[std::make_pair(m_nodeId, address)] = request->GetSize();
+
+    Ptr<UbWqeSegment> response = CreateObject<UbWqeSegment>();
+    response->SetSrc(m_nodeId);
+    response->SetDest(request->GetSrc());
+    response->SetSport(request->GetDport());
+    response->SetDport(request->GetSport());
+    response->SetType(TaOpcode::TA_OPCODE_TRANSACTION_ACK);
+    // Keep a non-zero carrier so the existing TP scheduler will serialize one response packet.
+    response->SetSize(1);
+    response->SetPriority(request->GetPriority());
+    response->SetTaskId(request->GetTaskId());
+    response->SetWqeSize(request->GetWqeSize());
+    response->SetOrderType(request->GetOrderType());
+    response->SetJettyNum(request->GetOriginJettyNum());
+    response->SetTaMsn(0);
+    response->SetTaSsn(static_cast<uint16_t>(request->GetRequestTassn()));
+    response->SetSegmentKind(UbTransactionSegmentKind::RESPONSE);
+    response->SetOriginJettyNum(request->GetOriginJettyNum());
+    response->SetRequestTassn(request->GetRequestTassn());
+    response->SetRequestOpcode(TaOpcode::TA_OPCODE_WRITE);
+    response->SetResponseBytes(0);
+    response->SetRemoteAddress(address);
+    response->SetNeedsTransactionResponse(false);
+    response->SetTpn(localTpn);
+    return response;
+}
+
+Ptr<UbWqeSegment> UbTransaction::ExecuteRemoteReadAndBuildResponse(uint32_t localTpn,
+                                                                   Ptr<UbWqeSegment> request)
+{
+    if (request == nullptr) {
+        return nullptr;
+    }
+
+    const uint64_t address = DeriveRemoteAddress(request);
+    const auto memoryIt = m_memoryStore.find(std::make_pair(m_nodeId, address));
+    const uint32_t responseBytes = request->GetResponseBytes() == 0 ? request->GetSize()
+                                                                     : request->GetResponseBytes();
+    (void)memoryIt;
+
+    Ptr<UbWqeSegment> response = CreateObject<UbWqeSegment>();
+    response->SetSrc(m_nodeId);
+    response->SetDest(request->GetSrc());
+    response->SetSport(request->GetDport());
+    response->SetDport(request->GetSport());
+    response->SetType(TaOpcode::TA_OPCODE_READ_RESPONSE);
+    response->SetSize(responseBytes);
+    response->SetPriority(request->GetPriority());
+    response->SetTaskId(request->GetTaskId());
+    response->SetWqeSize(request->GetWqeSize());
+    response->SetOrderType(request->GetOrderType());
+    response->SetJettyNum(request->GetOriginJettyNum());
+    response->SetTaMsn(0);
+    response->SetTaSsn(static_cast<uint16_t>(request->GetRequestTassn()));
+    response->SetSegmentKind(UbTransactionSegmentKind::RESPONSE);
+    response->SetOriginJettyNum(request->GetOriginJettyNum());
+    response->SetRequestTassn(request->GetRequestTassn());
+    response->SetRequestOpcode(TaOpcode::TA_OPCODE_READ);
+    response->SetResponseBytes(responseBytes);
+    response->SetRemoteAddress(address);
+    response->SetNeedsTransactionResponse(false);
+    response->SetTpn(localTpn);
+    return response;
+}
+
+void UbTransaction::CompleteLocalRequestFromResponse(Ptr<UbWqeSegment> response)
+{
+    if (response == nullptr) {
+        return;
+    }
+
+    const bool isWriteAck =
+        response->GetType() == TaOpcode::TA_OPCODE_TRANSACTION_ACK &&
+        response->GetRequestOpcode() == TaOpcode::TA_OPCODE_WRITE;
+    const bool isReadResponse =
+        response->GetType() == TaOpcode::TA_OPCODE_READ_RESPONSE &&
+        response->GetRequestOpcode() == TaOpcode::TA_OPCODE_READ;
+    if (!isWriteAck && !isReadResponse) {
+        return;
+    }
+
+    ProcessWqeSegmentComplete(response);
+}
+
+uint64_t UbTransaction::DeriveRemoteAddress(const Ptr<UbWqeSegment>& request) const
+{
+    NS_ASSERT_MSG(request != nullptr, "request must exist when deriving a remote address");
+    return request->GetRemoteAddress() +
+           static_cast<uint64_t>(request->GetTaSsn()) * UB_WQE_TA_SEGMENT_BYTE;
 }
 
 void UbTransaction::TriggerTpTransmit(uint32_t jettyNum)
@@ -434,6 +611,7 @@ void UbTransaction::DoDispose()
     m_tpSchedulingStatus.clear();
     m_random = nullptr;
     m_serviceMode.clear();
+    m_memoryStore.clear();
     for (auto &it : m_jettyOrderedWqe) {
         it.second.clear();
     }

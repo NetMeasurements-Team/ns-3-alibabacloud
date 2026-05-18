@@ -2,9 +2,9 @@
 #include "ub-controller.h"
 #include <ns3/log.h>
 #include <algorithm>
-#include "protocol/ub-transport.h"
-#include "protocol/ub-datalink.h"
-#include "protocol/ub-transaction.h"
+#include "ns3/ub-transport.h"
+#include "ns3/ub-datalink.h"
+#include "ns3/ub-transaction.h"
 #include "ns3/ub-network-address.h"
 #include "ns3/ub-utils.h"
 
@@ -58,6 +58,9 @@ Ptr<UbTransportChannel> UbController::GetTpByTpn(uint32_t tpn)
 }
 
 // Transport channel management
+// bool UbController::CreateTp(uint32_t src, uint32_t dest, uint8_t sport,
+//                             uint8_t dport, UbPriority priority, uint32_t srcTpn,
+//                             uint32_t dstTpn, Ptr<UbCongestionControl> congestionCtrl)
 bool UbController::CreateTp(const Connection& conn, Ptr<UbCongestionControl> congestionCtrl)
 {
     NS_LOG_FUNCTION(this << conn.node1 << conn.node2 << conn.port1 << conn.port2 << conn.priority << conn.tpn1);
