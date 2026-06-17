@@ -481,8 +481,13 @@ Ptr<Packet> UbTransportChannel::GenDataPacket(Ptr<UbWqeSegment> wqeSegment,
     }
     TpHeader.SetTPOpcode(0x1);
     TpHeader.SetNLP(0x0);
-    TpHeader.SetSrcTpn(m_tpn);
-    TpHeader.SetDestTpn(m_dstTpn);
+    if (wqeSegment->GetSegmentKind() == UbTransactionSegmentKind::RESPONSE) {
+        TpHeader.SetSrcTpn(m_dstTpn);
+        TpHeader.SetDestTpn(m_tpn);
+    } else {
+        TpHeader.SetSrcTpn(m_tpn);
+        TpHeader.SetDestTpn(m_dstTpn);
+    }
     TpHeader.SetAckRequest(1);
     TpHeader.SetErrorFlag(0);
     TpHeader.SetPsn(m_psnSndNxt);
@@ -496,9 +501,17 @@ Ptr<Packet> UbTransportChannel::GenDataPacket(Ptr<UbWqeSegment> wqeSegment,
             m_lbHashSalt++;
         }
     }
-    UbPort::AddUdpHeader(p, this);
+    if (wqeSegment->GetSegmentKind() == UbTransactionSegmentKind::RESPONSE) {
+        UbPort::AddUdpHeader(p, GetUdpSport(), GetSport());
+    } else {
+        UbPort::AddUdpHeader(p, this);
+    }
     // add ipv4 header
-    UbPort::AddIpv4Header(p, this);
+    if (wqeSegment->GetSegmentKind() == UbTransactionSegmentKind::RESPONSE) {
+        UbPort::AddIpv4Header(p, GetDip(), GetSip());
+    } else {
+        UbPort::AddIpv4Header(p, this);
+    }
     // add network header
     UbIpBasedNetworkHeader networkHeader;
     m_congestionCtrl->OnSenderPrepareIpBasedNetworkHeader(networkHeader);
