@@ -237,7 +237,7 @@ void UbHostCaqm::OnSenderDataPacketSent(uint32_t psn, uint32_t size)
 }
 
 // 接收端接到数据包后记录数据
-void UbHostCaqm::OnReceiverDataPacketReceived(uint32_t psn,
+void UbHostCaqm::OnReceiverDataPacketReceived(uint64_t psn,
                                               uint32_t size,
                                               UbIpBasedNetworkHeader header)
 {
@@ -263,12 +263,12 @@ void UbHostCaqm::OnReceiverDataPacketReceived(uint32_t psn,
 }
 
 // 接收端生成拥塞控制算法需要的ack header
-UbCongestionExtTph UbHostCaqm::OnReceiverPrepareAckCongestionHeader(uint32_t psnStart,
-                                                                    uint32_t psnEnd)
+UbCongestionExtTph UbHostCaqm::OnReceiverPrepareAckCongestionHeader(uint64_t psnStart,
+                                                                    uint64_t psnEnd)
 {
     UbCongestionExtTph cetph;
     if (m_congestionCtrlEnabled) {
-        for (uint32_t i = psnStart; i < psnEnd; i++) {
+        for (uint64_t i = psnStart; i < psnEnd; i++) {
             m_dataByteRecvd += m_recvdPsnPacketSizeMap[i];
             m_recvdPsnPacketSizeMap.erase(i);
             uint8_t C = m_recvdPsnCMap[i];
@@ -303,7 +303,13 @@ UbCongestionExtTph UbHostCaqm::OnReceiverPrepareAckCongestionHeader(uint32_t psn
         cetph.SetC(m_CE);
         cetph.SetI(m_IE);
         cetph.SetHint(m_HintE);
-        utils::UbUtils::CaqmAckNotify(m_src, m_tpn, psnStart, psnEnd, m_CE, m_IE, m_HintE);
+        utils::UbUtils::CaqmAckNotify(m_src,
+                                      m_tpn,
+                                      static_cast<uint32_t>(psnStart & 0xFFFFFFull),
+                                      static_cast<uint32_t>(psnEnd & 0xFFFFFFull),
+                                      m_CE,
+                                      m_IE,
+                                      m_HintE);
         m_CE = 0;
         m_IE = 0;
         m_HintE = 0;
@@ -317,6 +323,104 @@ UbCongestionExtTph UbHostCaqm::OnReceiverPrepareAckCongestionHeader(uint32_t psn
     }
 }
 
+void
+UbHostCaqm::ApplySenderCetphFeedback(uint32_t psn, const UbCongestionExtTph& header)
+{
+    const auto sentIt = m_psnSendTimeMap.find(psn);
+    if (sentIt != m_psnSendTimeMap.end()) {
+        UpdateRttEstimate(Simulator::Now() - sentIt->second);
+    }
+
+    uint32_t sequence = header.GetAckSequence();
+    if (sequence < m_lastSequence && m_lastSequence > DATA_BYTE_RECVD_RESET_NUM) {
+        m_dataByteSent = (m_dataByteSent >= DATA_BYTE_RECVD_RESET_NUM)
+                             ? (m_dataByteSent - DATA_BYTE_RECVD_RESET_NUM)
+                             : 0;
+    }
+    m_lastSequence = sequence;
+    m_inFlight = (m_dataByteSent >= sequence) ? (m_dataByteSent - sequence) : 0;
+    uint8_t c_e = header.GetC();
+    bool i_e = header.GetI();
+    uint16_t hint = header.GetHint();
+    NS_LOG_DEBUG("[" << GetTypeId().GetName() << "]"
+              << "[Debug]"
+              << "[" << __FUNCTION__ << "]"
+              << " Recv ack."
+              << " Local:"<< m_src
+              << " Recv from:" << m_dst
+              << " Psn:" << psn
+              << " Tpn:" << m_tpn
+              << " Sent byte:" << m_dataByteSent
+              << " Sequence:" << sequence
+              << " Inflght:" << m_inFlight
+              << " C_E:" << (int)c_e
+              << " I_E:" << (int)i_e
+              << " Hint_e:" << (int)hint);
+    utils::UbUtils::CaqmSenderStateNotify(m_src, m_tpn, psn, sequence, m_inFlight, m_cwnd, c_e, i_e, hint);
+    // 收到拥塞或者拒绝增窗反馈，切换至拥塞避免阶段。
+    // 同时重启定时器，一段时间后若仍没有收到含有阻塞或拒绝增窗的ack，则切换到慢启动阶段，
+    if (c_e > 0 || i_e == 0) {
+        NS_LOG_DEBUG("[" << GetTypeId().GetName() << "]"
+                  << "[Debug]"
+                  << "[" << __FUNCTION__ << "]"
+                  << " Congesiton or refuse.");
+        m_congestionState = CONGESTION_AVOIDANCE;
+        m_congestionStateResetEvent.Cancel();
+        m_congestionStateResetEvent =
+            Simulator::Schedule(m_rtt * m_theta,
+                                &UbHostCaqm::StateReset,
+                                this);
+    }
+    uint32_t oldCwnd;
+    // i为1，增窗
+    if (i_e == 1) {
+        oldCwnd = m_cwnd;
+        m_cwnd += hint;
+        NS_LOG_DEBUG("[" << GetTypeId().GetName() << "]"
+                  << "[Debug]"
+                  << "[" << __FUNCTION__ << "]"
+                  << " Congestion state:" << m_congestionState
+                  << " Cwnd increase:" << oldCwnd
+                  << "->"
+                  << m_cwnd
+                  << " Rest cwnd:" << m_cwnd - m_inFlight);
+    }
+    // 存在阻塞情况
+    if (c_e >= 1 && m_cwnd > UB_MTU_BYTE) {
+        oldCwnd = m_cwnd;
+        // cwnd = max(cwnd - c_e * β * MTU, MTU / 2)
+        m_cwnd = m_cwnd - c_e * m_beta * UB_MTU_BYTE >= UB_MTU_BYTE / 2
+                ? m_cwnd - c_e * m_beta * UB_MTU_BYTE : UB_MTU_BYTE / 2;
+        NS_LOG_DEBUG("[" << GetTypeId().GetName() << "]"
+                  << "[Debug]"
+                  << "[" << __FUNCTION__ << "]"
+                  << " Congestion state:" << m_congestionState
+                  << " Cwnd > mtu, decrease from:" << oldCwnd
+                  << "->"
+                  << m_cwnd
+                  << " Rest cwnd:" << m_cwnd - m_inFlight);
+    } else if (c_e >= 1 && m_cwnd <= UB_MTU_BYTE) {
+        oldCwnd = m_cwnd;
+        // cwnd = max(cwnd / 2, γ * MTU)
+        m_cwnd = m_cwnd / 2 > m_gamma * UB_MTU_BYTE ? m_cwnd / 2 : m_gamma * UB_MTU_BYTE;
+        NS_LOG_DEBUG("[" << GetTypeId().GetName() << "]"
+                  << "[Debug]"
+                  << "[" << __FUNCTION__ << "]"
+                  << " Congestion state:" << m_congestionState
+                  << " Cwnd <= mtu, decrease from:" << oldCwnd
+                  << "->"
+                  << m_cwnd
+                  << " Rest cwnd:" << m_cwnd - m_inFlight);
+    }
+    if (m_cwnd < UB_MTU_BYTE) {
+        m_cwnd = UB_MTU_BYTE;
+        NS_LOG_DEBUG("[" << GetTypeId().GetName() << "]"
+                  << "[Debug]"
+                  << "[" << __FUNCTION__ << "]"
+                  << " Cwnd < mtu. Reset to UB_MTU_BYTE.");
+    }
+}
+
 // 发送端收到ack，调整窗口、速率等数据
 void UbHostCaqm::OnSenderCongestionNotification(TpOpcode opcode,
                                                 uint32_t psn,
@@ -326,97 +430,42 @@ void UbHostCaqm::OnSenderCongestionNotification(TpOpcode opcode,
         return;
     }
     if (m_congestionCtrlEnabled) {
-        const auto sentIt = m_psnSendTimeMap.find(psn);
-        if (sentIt != m_psnSendTimeMap.end()) {
-            UpdateRttEstimate(Simulator::Now() - sentIt->second);
-        }
-        uint32_t sequence = header.GetAckSequence();
-        if (sequence < m_lastSequence && m_lastSequence > DATA_BYTE_RECVD_RESET_NUM) {
-            m_dataByteSent -= DATA_BYTE_RECVD_RESET_NUM;
-        }
-        m_lastSequence = sequence;
-        m_inFlight = m_dataByteSent - sequence;
-        uint8_t c_e = header.GetC();
-        bool i_e = header.GetI();
-        uint16_t hint = header.GetHint();
-        NS_LOG_DEBUG("[" << GetTypeId().GetName() << "]"
-                  << "[Debug]"
-                  << "[" << __FUNCTION__ << "]"
-                  << " Recv ack."
-                  << " Local:"<< m_src
-                  << " Recv from:" << m_dst
-                  << " Psn:" << psn
-                  << " Tpn:" << m_tpn
-                  << " Sent byte:" << m_dataByteSent
-                  << " Sequence:" << sequence
-                  << " Inflght:" << m_inFlight
-                  << " C_E:" << (int)c_e
-                  << " I_E:" << (int)i_e
-                  << " Hint_e:" << (int)hint);
-        utils::UbUtils::CaqmSenderStateNotify(m_src, m_tpn, psn, sequence, m_inFlight, m_cwnd, c_e, i_e, hint);
-        // 收到拥塞或者拒绝增窗反馈，切换至拥塞避免阶段。
-        // 同时重启定时器，一段时间后若仍没有收到含有阻塞或拒绝增窗的ack，则切换到慢启动阶段，
-        if (c_e > 0 || i_e == 0) {
-            NS_LOG_DEBUG("[" << GetTypeId().GetName() << "]"
-                      << "[Debug]"
-                      << "[" << __FUNCTION__ << "]"
-                      << " Congesiton or refuse.");
-            m_congestionState = CONGESTION_AVOIDANCE;
-            m_congestionStateResetEvent.Cancel();
-            m_congestionStateResetEvent =
-                Simulator::Schedule(m_rtt * m_theta,
-                                    &UbHostCaqm::StateReset,
-                                    this);
-        }
-        uint32_t oldCwnd;
-        // i为1，增窗
-        if (i_e == 1) {
-            oldCwnd = m_cwnd;
-            m_cwnd += hint;
-            NS_LOG_DEBUG("[" << GetTypeId().GetName() << "]"
-                      << "[Debug]"
-                      << "[" << __FUNCTION__ << "]"
-                      << " Congestion state:" << m_congestionState
-                      << " Cwnd increase:" << oldCwnd
-                      << "->"
-                      << m_cwnd
-                      << " Rest cwnd:" << m_cwnd - m_inFlight);
-        }
-        // 存在阻塞情况
-        if (c_e >= 1 && m_cwnd > UB_MTU_BYTE) {
-            oldCwnd = m_cwnd;
-            // cwnd = max(cwnd - c_e * β * MTU, MTU / 2)
-            m_cwnd = m_cwnd - c_e * m_beta * UB_MTU_BYTE >= UB_MTU_BYTE / 2
-                    ? m_cwnd - c_e * m_beta * UB_MTU_BYTE : UB_MTU_BYTE / 2;
-            NS_LOG_DEBUG("[" << GetTypeId().GetName() << "]"
-                      << "[Debug]"
-                      << "[" << __FUNCTION__ << "]"
-                      << " Congestion state:" << m_congestionState
-                      << " Cwnd > mtu, decrease from:" << oldCwnd
-                      << "->"
-                      << m_cwnd
-                      << " Rest cwnd:" << m_cwnd - m_inFlight);
-        } else if (c_e >= 1 && m_cwnd <= UB_MTU_BYTE) {
-            oldCwnd = m_cwnd;
-            // cwnd = max(cwnd / 2, γ * MTU)
-            m_cwnd = m_cwnd / 2 > m_gamma * UB_MTU_BYTE ? m_cwnd / 2 : m_gamma * UB_MTU_BYTE;
-            NS_LOG_DEBUG("[" << GetTypeId().GetName() << "]"
-                      << "[Debug]"
-                      << "[" << __FUNCTION__ << "]"
-                      << " Congestion state:" << m_congestionState
-                      << " Cwnd <= mtu, decrease from:" << oldCwnd
-                      << "->"
-                      << m_cwnd
-                      << " Rest cwnd:" << m_cwnd - m_inFlight);
-        }
-        if (m_cwnd < UB_MTU_BYTE) {
-            m_cwnd = UB_MTU_BYTE;
-            NS_LOG_DEBUG("[" << GetTypeId().GetName() << "]"
-                      << "[Debug]"
-                      << "[" << __FUNCTION__ << "]"
-                      << " Cwnd < mtu. Reset to UB_MTU_BYTE.");
-        }
+        ApplySenderCetphFeedback(psn, header);
     }
+}
+
+void
+UbHostCaqm::OnSenderCongestionNotification(TpOpcode opcode,
+                                           uint32_t psn,
+                                           UbCongestionExtTph header,
+                                           uint32_t retransmitBytes)
+{
+    if (opcode != TpOpcode::TP_OPCODE_ACK_WITH_CETPH)
+    {
+        return;
+    }
+    if (!m_congestionCtrlEnabled)
+    {
+        return;
+    }
+
+    if (m_dataByteSent >= retransmitBytes)
+    {
+        m_dataByteSent -= retransmitBytes;
+    }
+    else
+    {
+        m_dataByteSent = 0;
+    }
+
+    m_inFlight = std::min(m_inFlight, m_dataByteSent);
+    ApplySenderCetphFeedback(psn, header);
+}
+
+void
+UbHostCaqm::OnSenderRetransmissionPacketSent(uint32_t psn, uint32_t size)
+{
+    OnSenderDataPacketSent(psn, size);
 }
 
 void UbHostCaqm::StateReset()

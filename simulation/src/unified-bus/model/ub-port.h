@@ -177,6 +177,8 @@ public:
     }
     
     void TransmitPacket(Ptr<Packet>, Time delay);
+
+    void TransmitPacketDetached(Ptr<Packet>);
     
     /// Reset the channel into READY state and try transmit again
     void TransmitComplete();

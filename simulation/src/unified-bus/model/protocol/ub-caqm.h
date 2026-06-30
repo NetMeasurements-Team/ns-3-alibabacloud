@@ -53,6 +53,8 @@ public:
     static TypeId GetTypeId(void);
 
     Time GetRttForTest() const { return m_rtt; }
+    uint32_t GetInflightForTest() const { return m_inFlight; }
+    uint32_t GetDataByteSentForTest() const { return m_dataByteSent; }
     void ApplyRttSampleForTest(Time sample);
 
     // 初始化
@@ -69,22 +71,28 @@ public:
     void OnSenderDataPacketSent(uint32_t psn, uint32_t size) override;
 
     // 接收端接到数据包后记录数据
-    void OnReceiverDataPacketReceived(uint32_t psn,
+    void OnReceiverDataPacketReceived(uint64_t psn,
                                       uint32_t size,
                                       UbIpBasedNetworkHeader header) override;
 
     // 接收端生成拥塞控制算法需要的ack header
-    UbCongestionExtTph OnReceiverPrepareAckCongestionHeader(uint32_t psnStart,
-                                                            uint32_t psnEnd) override;
+    UbCongestionExtTph OnReceiverPrepareAckCongestionHeader(uint64_t psnStart,
+                                                            uint64_t psnEnd) override;
 
     // 发送端收到拥塞通知，调整窗口、速率等数据
     void OnSenderCongestionNotification(TpOpcode opcode,
                                         uint32_t psn,
                                         UbCongestionExtTph header) override;
+    void OnSenderCongestionNotification(TpOpcode opcode,
+                                        uint32_t psn,
+                                        UbCongestionExtTph header,
+                                        uint32_t retransmitBytes) override;
+    void OnSenderRetransmissionPacketSent(uint32_t psn, uint32_t size) override;
 
 private:
     void StateReset();
     void UpdateRttEstimate(Time sample);
+    void ApplySenderCetphFeedback(uint32_t psn, const UbCongestionExtTph& header);
 
     void DoDispose() override;
 
@@ -105,10 +113,10 @@ private:
 
     uint32_t    m_lastSequence = 0;
 
-    std::unordered_map<uint32_t, uint32_t> m_recvdPsnPacketSizeMap;
-    std::unordered_map<uint32_t, uint16_t> m_recvdPsnHintMap;
-    std::unordered_map<uint32_t, uint8_t> m_recvdPsnCMap;
-    std::unordered_map<uint32_t, uint8_t> m_recvdPsnIMap;
+    std::unordered_map<uint64_t, uint32_t> m_recvdPsnPacketSizeMap;
+    std::unordered_map<uint64_t, uint16_t> m_recvdPsnHintMap;
+    std::unordered_map<uint64_t, uint8_t> m_recvdPsnCMap;
+    std::unordered_map<uint64_t, uint8_t> m_recvdPsnIMap;
 
     std::unordered_map<uint32_t, Time> m_psnSendTimeMap;
 

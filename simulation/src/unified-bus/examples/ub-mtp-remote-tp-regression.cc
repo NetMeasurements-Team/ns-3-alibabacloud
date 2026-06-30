@@ -85,6 +85,7 @@ ObserveSenderTpRecv(uint32_t,
                     PacketType type,
                     uint32_t size,
                     uint32_t,
+                    std::string,
                     UbPacketTraceTag)
 {
     if (type != PacketType::ACK || srcTpn != kReceiverTpn || dstTpn != kSenderTpn)
@@ -109,6 +110,7 @@ ObserveReceiverTpRecv(uint32_t,
                       PacketType type,
                       uint32_t size,
                       uint32_t,
+                      std::string,
                       UbPacketTraceTag)
 {
     if (type != PacketType::PACKET || srcTpn != kSenderTpn || dstTpn != kReceiverTpn)

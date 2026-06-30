@@ -402,7 +402,7 @@ UbHostDcqcn::OnSenderTransportIdle()
 }
 
 void
-UbHostDcqcn::OnReceiverDataPacketReceived(uint32_t psn,
+UbHostDcqcn::OnReceiverDataPacketReceived(uint64_t psn,
                                           uint32_t size,
                                           UbIpBasedNetworkHeader header)
 {
@@ -447,7 +447,7 @@ UbHostDcqcn::OnReceiverDataPacketReceived(uint32_t psn,
 }
 
 UbCongestionExtTph
-UbHostDcqcn::OnReceiverPrepareAckCongestionHeader(uint32_t psnStart, uint32_t psnEnd)
+UbHostDcqcn::OnReceiverPrepareAckCongestionHeader(uint64_t psnStart, uint64_t psnEnd)
 {
     (void)psnStart;
     (void)psnEnd;
@@ -494,6 +494,12 @@ UbHostDcqcn::OnSenderDataPacketSent(uint32_t psn, uint32_t size)
         m_bytesSinceLastIncrease -= m_byteCounterThreshold;
         HandleByteCounterEvent();
     }
+}
+
+void
+UbHostDcqcn::OnSenderRetransmissionPacketSent(uint32_t psn, uint32_t size)
+{
+    OnSenderDataPacketSent(psn, size);
 }
 
 void
@@ -575,7 +581,7 @@ UbSwitchDcqcn::GetTypeId(void)
                           MakeUintegerAccessor(&UbSwitchDcqcn::m_kmaxBytes),
                           MakeUintegerChecker<uint32_t>())
             .AddAttribute("Pmax",
-                          "DCQCN maximum marking probability once queue occupancy reaches KmaxBytes.",
+                          "DCQCN marking probability at KmaxBytes in the RED-ECN linear region.",
                           DoubleValue(0.01),
                           MakeDoubleAccessor(&UbSwitchDcqcn::m_pmax),
                           MakeDoubleChecker<double>(0.0, 1.0));
@@ -638,14 +644,14 @@ UbSwitchDcqcn::MaybeMarkPacket(uint32_t outPort, Ptr<Packet> p)
     }
 
     const uint64_t totalQueueOccupancy = GetOutPortBacklogBytes(outPort);
-    if (totalQueueOccupancy <= m_kminBytes || m_pmax <= 0.0)
+    if (totalQueueOccupancy <= m_kminBytes)
     {
         restoreHeaders();
         return;
     }
 
-    double markProbability = m_pmax;
-    if (m_kmaxBytes > m_kminBytes && totalQueueOccupancy < m_kmaxBytes)
+    double markProbability = 1.0;
+    if (m_kmaxBytes > m_kminBytes && totalQueueOccupancy <= m_kmaxBytes)
     {
         const double occupancySpan = static_cast<double>(m_kmaxBytes - m_kminBytes);
         markProbability =

@@ -32,6 +32,7 @@ build_lib(
 	model/protocol/ub-transaction.cc
 	model/protocol/ub-function.cc
 	model/protocol/ub-transport.cc
+	model/protocol/ub-retrans.cc
 	model/protocol/ub-routing-process.cc
 	model/ub-switch-allocator.cc
 	model/ub-utils.cc
@@ -55,12 +56,14 @@ build_lib(
 	model/ub-datatype.h
 	model/protocol/ub-header.h
 	model/ub-link.h
+	model/ub-modulo-sequence.h
 	model/ub-port.h
 	model/ub-sliding-bitmap-window.h
 	model/ub-switch.h
 	model/protocol/ub-transaction.h
 	model/protocol/ub-function.h
 	model/protocol/ub-transport.h
+	model/protocol/ub-retrans.h
 	model/protocol/ub-routing-process.h
 	model/ub-switch-allocator.h
 	model/ub-utils.h

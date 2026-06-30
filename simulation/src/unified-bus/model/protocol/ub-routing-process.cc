@@ -15,6 +15,11 @@ namespace ns3 {
 NS_OBJECT_ENSURE_REGISTERED(UbRoutingProcess);
 NS_LOG_COMPONENT_DEFINE("UbRoutingProcess");
 
+namespace
+{
+constexpr uint32_t kPrimaryRangeRoutePort = std::numeric_limits<uint32_t>::max();
+}
+
 /*-----------------------------------------UbRoutingProcess----------------------------------------------*/
 TypeId UbRoutingProcess::GetTypeId(void)
 {
@@ -35,6 +40,21 @@ UbRoutingProcess::UbRoutingProcess()
 {
 }
 
+std::shared_ptr<std::vector<uint16_t> >
+UbRoutingProcess::GetOrCreatePortSet(const std::vector<uint16_t>& ports)
+{
+    std::vector<uint16_t> normalized = normalizePorts(ports);
+    auto it = m_portSetPool.find(normalized);
+    if (it != m_portSetPool.end())
+    {
+        return it->second;
+    }
+
+    auto sharedPorts = std::make_shared<std::vector<uint16_t>>(normalized);
+    m_portSetPool[normalized] = sharedPorts;
+    return sharedPorts;
+}
+
 void UbRoutingProcess::AddShortestRoute(const uint32_t destIP, const std::vector<uint16_t>& outPorts)
 {
     // 标准化端口集合（排序去重）
@@ -44,19 +64,7 @@ void UbRoutingProcess::AddShortestRoute(const uint32_t destIP, const std::vector
         target.insert(target.end(), (*(itRt->second)).begin(), (*(itRt->second)).end());
     }
     target.insert(target.end(), outPorts.begin(), outPorts.end());
-    std::vector<uint16_t> normalized = normalizePorts(target);
-    
-    // 查找或创建共享端口集合
-    auto it = m_portSetPool.find(normalized);
-    if (it != m_portSetPool.end()) {
-        //  已存在相同端口集合，共享指针
-        m_rtShortest[destIP] = it->second;
-    } else {
-        // 创建新端口集合并加入池中
-        auto sharedPorts = std::make_shared<std::vector<uint16_t>>(normalized);
-        m_portSetPool[normalized] = sharedPorts;
-        m_rtShortest[destIP] = sharedPorts;
-    }
+    m_rtShortest[destIP] = GetOrCreatePortSet(target);
 }
 
 void UbRoutingProcess::AddOtherRoute(const uint32_t destIP, const std::vector<uint16_t>& outPorts)
@@ -68,18 +76,150 @@ void UbRoutingProcess::AddOtherRoute(const uint32_t destIP, const std::vector<ui
         target.insert(target.end(), (*(itRt->second)).begin(), (*(itRt->second)).end());
     }
     target.insert(target.end(), outPorts.begin(), outPorts.end());
-    std::vector<uint16_t> normalized = normalizePorts(target);
-    
-    // 查找或创建共享端口集合
-    auto it = m_portSetPool.find(normalized);
-    if (it != m_portSetPool.end()) {
-        // 已存在相同端口集合，共享指针
-        m_rtOther[destIP] = it->second;
-    } else {
-        // 创建新端口集合并加入池中
-        auto sharedPorts = std::make_shared<std::vector<uint16_t>>(normalized);
-        m_portSetPool[normalized] = sharedPorts;
-        m_rtOther[destIP] = sharedPorts;
+    m_rtOther[destIP] = GetOrCreatePortSet(target);
+}
+
+void
+UbRoutingProcess::AddRouteRange(RouteRangeByPortMap& routeRangesByPort,
+                                uint32_t startNodeId,
+                                uint32_t endNodeId,
+                                uint32_t dstPortId,
+                                const std::vector<uint16_t>& outPorts)
+{
+    AddRouteRangeToMap(routeRangesByPort[dstPortId], startNodeId, endNodeId, outPorts);
+}
+
+void
+UbRoutingProcess::AddRouteRangeToMap(RouteRangeMap& routeRanges,
+                                     uint32_t startNodeId,
+                                     uint32_t endNodeId,
+                                     const std::vector<uint16_t>& outPorts)
+{
+    NS_ASSERT_MSG(startNodeId <= endNodeId, "route range start must not exceed end");
+
+    auto valueAt = [&routeRanges](uint32_t nodeId) -> std::shared_ptr<std::vector<uint16_t> > {
+        auto it = routeRanges.upper_bound(nodeId);
+        if (it == routeRanges.begin())
+        {
+            return nullptr;
+        }
+        --it;
+        return it->second;
+    };
+
+    if (routeRanges.find(startNodeId) == routeRanges.end())
+    {
+        routeRanges[startNodeId] = valueAt(startNodeId);
+    }
+    if (endNodeId != std::numeric_limits<uint32_t>::max())
+    {
+        const uint32_t afterEnd = endNodeId + 1;
+        if (routeRanges.find(afterEnd) == routeRanges.end())
+        {
+            routeRanges[afterEnd] = valueAt(afterEnd);
+        }
+    }
+
+    for (auto it = routeRanges.lower_bound(startNodeId);
+         it != routeRanges.end() && it->first <= endNodeId;
+         ++it)
+    {
+        std::vector<uint16_t> target;
+        if (it->second != nullptr)
+        {
+            target.insert(target.end(), it->second->begin(), it->second->end());
+        }
+        target.insert(target.end(), outPorts.begin(), outPorts.end());
+        it->second = GetOrCreatePortSet(target);
+    }
+}
+
+void
+UbRoutingProcess::AddShortestRouteRange(uint32_t startNodeId,
+                                        uint32_t endNodeId,
+                                        const std::vector<uint16_t>& outPorts)
+{
+    AddShortestRouteRange(startNodeId, endNodeId, 0, outPorts);
+}
+
+void
+UbRoutingProcess::AddOtherRouteRange(uint32_t startNodeId,
+                                     uint32_t endNodeId,
+                                     const std::vector<uint16_t>& outPorts)
+{
+    AddOtherRouteRange(startNodeId, endNodeId, 0, outPorts);
+}
+
+void
+UbRoutingProcess::AddShortestRouteRange(uint32_t startNodeId,
+                                        uint32_t endNodeId,
+                                        uint32_t dstPortId,
+                                        const std::vector<uint16_t>& outPorts)
+{
+    AddRouteRange(m_rtShortestRanges,
+                  startNodeId,
+                  endNodeId,
+                  kPrimaryRangeRoutePort,
+                  outPorts);
+    AddRouteRange(m_rtShortestRanges, startNodeId, endNodeId, dstPortId, outPorts);
+}
+
+void
+UbRoutingProcess::AddOtherRouteRange(uint32_t startNodeId,
+                                     uint32_t endNodeId,
+                                     uint32_t dstPortId,
+                                     const std::vector<uint16_t>& outPorts)
+{
+    AddRouteRange(m_rtOtherRanges,
+                  startNodeId,
+                  endNodeId,
+                  kPrimaryRangeRoutePort,
+                  outPorts);
+    AddRouteRange(m_rtOtherRanges, startNodeId, endNodeId, dstPortId, outPorts);
+}
+
+bool
+UbRoutingProcess::GetRangeOutPortsFromMap(const RouteRangeMap& routeRanges,
+                                          uint32_t nodeId,
+                                          std::vector<uint16_t>& outPorts)
+{
+    if (routeRanges.empty())
+    {
+        return false;
+    }
+
+    auto it = routeRanges.upper_bound(nodeId);
+    if (it == routeRanges.begin())
+    {
+        return false;
+    }
+    --it;
+    if (it->second == nullptr)
+    {
+        return false;
+    }
+    outPorts.insert(outPorts.end(), it->second->begin(), it->second->end());
+    return true;
+}
+
+void
+UbRoutingProcess::GetRangeOutPorts(const RouteRangeByPortMap& routeRangesByPort,
+                                   const uint32_t destIP,
+                                   std::vector<uint16_t>& outPorts)
+{
+    if (routeRangesByPort.empty())
+    {
+        return;
+    }
+
+    const Ipv4Address ip(destIP);
+    const uint32_t nodeId = utils::IpToNodeId(ip);
+    const uint32_t lastByte = destIP & 0x000000ff;
+    const uint32_t portId = lastByte == 0 ? kPrimaryRangeRoutePort : lastByte - 1;
+    auto portIt = routeRangesByPort.find(portId);
+    if (portIt != routeRangesByPort.end())
+    {
+        GetRangeOutPortsFromMap(portIt->second, nodeId, outPorts);
     }
 }
 
@@ -89,7 +229,9 @@ void UbRoutingProcess::GetShortestOutPorts(const uint32_t destIP, std::vector<ui
     auto it = m_rtShortest.find(destIP);
     if (it != m_rtShortest.end()) {
         outPorts.insert(outPorts.end(), (*(it->second)).begin(), (*(it->second)).end());
+        return;
     }
+    GetRangeOutPorts(m_rtShortestRanges, destIP, outPorts);
 }
 
 void UbRoutingProcess::GetOtherOutPorts(const uint32_t destIP, std::vector<uint16_t>& outPorts)
@@ -98,7 +240,9 @@ void UbRoutingProcess::GetOtherOutPorts(const uint32_t destIP, std::vector<uint1
     auto it = m_rtOther.find(destIP);
     if (it != m_rtOther.end()) {
         outPorts.insert(outPorts.end(), (*(it->second)).begin(), (*(it->second)).end());
+        return;
     }
+    GetRangeOutPorts(m_rtOtherRanges, destIP, outPorts);
 }
 
 void UbRoutingProcess::GetShortestCandidates(uint32_t &dip, uint16_t inPortId, std::vector<uint16_t>& outPorts)
@@ -151,10 +295,14 @@ const std::vector<uint16_t> UbRoutingProcess::GetAllOutPorts(const uint32_t dest
     auto it = m_rtOther.find(destIP);
     if (it != m_rtOther.end()) {
         res.insert(res.end(), (*(it->second)).begin(), (*(it->second)).end());
+    } else {
+        GetRangeOutPorts(m_rtOtherRanges, destIP, res);
     }
     it = m_rtShortest.find(destIP);
     if (it != m_rtShortest.end()) {
         res.insert(res.end(), (*(it->second)).begin(), (*(it->second)).end());
+    } else {
+        GetRangeOutPorts(m_rtShortestRanges, destIP, res);
     }
     return res;
 }

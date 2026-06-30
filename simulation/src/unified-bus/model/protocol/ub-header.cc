@@ -3,6 +3,8 @@
 #include "ns3/ub-datatype.h"
 #include "ns3/log.h"
 
+#include <stdexcept>
+
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE("UbHeader");
@@ -939,6 +941,16 @@ void UbTransportHeader::SetTpMsn(uint32_t tpMsn)
     m_tpMsn = tpMsn & 0xFFFFFF; // Only 24 bits
 }
 
+void UbTransportHeader::SetRspSt(uint8_t rspSt)
+{
+    m_rspSt = rspSt & 0x7;
+}
+
+void UbTransportHeader::SetRspInfo(uint8_t rspInfo)
+{
+    m_rspInfo = rspInfo & 0x1F;
+}
+
 // Getters
 bool UbTransportHeader::GetLastPacket() const
 {
@@ -985,6 +997,16 @@ uint32_t UbTransportHeader::GetTpMsn() const
     return m_tpMsn;
 }
 
+uint8_t UbTransportHeader::GetRspSt() const
+{
+    return m_rspSt;
+}
+
+uint8_t UbTransportHeader::GetRspInfo() const
+{
+    return m_rspInfo;
+}
+
 // Check validity methods
 bool UbTransportHeader::IsValidOpcode() const
 {
@@ -994,6 +1016,219 @@ bool UbTransportHeader::IsValidOpcode() const
 bool UbTransportHeader::IsValidNLP() const
 {
     return m_nlp <= static_cast<uint8_t>(NextLayerProtocol::NLP_CIP);
+}
+
+/*
+ ***************************************************
+ * UbSelectiveAckExtTph implementation
+ ***************************************************
+ */
+
+UbSelectiveAckExtTph::UbSelectiveAckExtTph() = default;
+
+UbSelectiveAckExtTph::~UbSelectiveAckExtTph() = default;
+
+TypeId
+UbSelectiveAckExtTph::GetTypeId(void)
+{
+    static TypeId tid = TypeId("ns3::UbSelectiveAckExtTph")
+                            .SetParent<Header>()
+                            .SetGroupName("UnifiedBus")
+                            .AddConstructor<UbSelectiveAckExtTph>();
+    return tid;
+}
+
+TypeId
+UbSelectiveAckExtTph::GetInstanceTypeId(void) const
+{
+    return GetTypeId();
+}
+
+void
+UbSelectiveAckExtTph::Print(std::ostream& os) const
+{
+    os << "UbSelectiveAckExtTph: bitmapBits=" << GetBitmapBitCount()
+       << " maxRcvPsn=" << m_maxRcvPsn;
+}
+
+uint32_t
+UbSelectiveAckExtTph::GetSerializedSize(void) const
+{
+    return kFixedHeaderBytes + (GetBitmapBitCount() / 8);
+}
+
+void
+UbSelectiveAckExtTph::Serialize(Buffer::Iterator start) const
+{
+    Buffer::Iterator i = start;
+    i.WriteU8(m_bitmapSizeEncoded & 0x7);
+    i.WriteU8((m_maxRcvPsn >> 16) & 0xFF);
+    i.WriteU8((m_maxRcvPsn >> 8) & 0xFF);
+    i.WriteU8(m_maxRcvPsn & 0xFF);
+
+    const uint32_t bitmapBytes = GetBitmapBitCount() / 8;
+    for (uint32_t index = 0; index < bitmapBytes; ++index)
+    {
+        i.WriteU8(m_bitmap[index]);
+    }
+}
+
+uint32_t
+UbSelectiveAckExtTph::Deserialize(Buffer::Iterator start)
+{
+    Buffer::Iterator i = start;
+    const uint8_t sizeByte = i.ReadU8();
+    if ((sizeByte & 0xF8) != 0)
+    {
+        throw std::invalid_argument("reserved SAETPH bitmap size high bits");
+    }
+
+    m_bitmapSizeEncoded = sizeByte & 0x7;
+    if (!IsSupportedEncodedBitmapSize(m_bitmapSizeEncoded))
+    {
+        throw std::invalid_argument("reserved SAETPH bitmap size encoding");
+    }
+
+    m_maxRcvPsn = (static_cast<uint32_t>(i.ReadU8()) << 16) |
+                  (static_cast<uint32_t>(i.ReadU8()) << 8) |
+                  static_cast<uint32_t>(i.ReadU8());
+    m_bitmap.fill(0);
+
+    const uint32_t bitmapBytes = GetBitmapBitCount() / 8;
+    for (uint32_t index = 0; index < bitmapBytes; ++index)
+    {
+        m_bitmap[index] = i.ReadU8();
+    }
+
+    return GetSerializedSize();
+}
+
+void
+UbSelectiveAckExtTph::SetBitmapBitCount(uint32_t bitCount)
+{
+    uint8_t encoded = 0;
+    if (!EncodeBitmapBitCount(bitCount, encoded))
+    {
+        throw std::invalid_argument("unsupported SAETPH bitmap width");
+    }
+
+    m_bitmapSizeEncoded = encoded;
+    m_bitmap.fill(0);
+}
+
+uint32_t
+UbSelectiveAckExtTph::GetBitmapBitCount() const
+{
+    return DecodeBitmapBitCount(m_bitmapSizeEncoded);
+}
+
+uint8_t
+UbSelectiveAckExtTph::GetEncodedBitmapSize() const
+{
+    return m_bitmapSizeEncoded;
+}
+
+void
+UbSelectiveAckExtTph::SetMaxRcvPsn(uint32_t psn)
+{
+    m_maxRcvPsn = psn & 0xFFFFFF;
+}
+
+uint32_t
+UbSelectiveAckExtTph::GetMaxRcvPsn() const
+{
+    return m_maxRcvPsn;
+}
+
+void
+UbSelectiveAckExtTph::SetBitmapBit(uint32_t offset, bool value)
+{
+    if (offset >= GetBitmapBitCount())
+    {
+        return;
+    }
+
+    const uint32_t byteIndex = offset / 8;
+    const uint8_t bitMask = static_cast<uint8_t>(1U << (offset % 8));
+    if (value)
+    {
+        m_bitmap[byteIndex] |= bitMask;
+    }
+    else
+    {
+        m_bitmap[byteIndex] &= static_cast<uint8_t>(~bitMask);
+    }
+}
+
+bool
+UbSelectiveAckExtTph::GetBitmapBit(uint32_t offset) const
+{
+    if (offset >= GetBitmapBitCount())
+    {
+        return false;
+    }
+
+    const uint32_t byteIndex = offset / 8;
+    const uint8_t bitMask = static_cast<uint8_t>(1U << (offset % 8));
+    return (m_bitmap[byteIndex] & bitMask) != 0;
+}
+
+bool
+UbSelectiveAckExtTph::IsSupportedBitmapBitCount(uint32_t bitCount)
+{
+    uint8_t encoded = 0;
+    return EncodeBitmapBitCount(bitCount, encoded);
+}
+
+bool
+UbSelectiveAckExtTph::IsSupportedEncodedBitmapSize(uint8_t encoded)
+{
+    return encoded <= 4;
+}
+
+uint32_t
+UbSelectiveAckExtTph::DecodeBitmapBitCount(uint8_t encoded)
+{
+    switch (encoded)
+    {
+    case 0:
+        return 64;
+    case 1:
+        return 128;
+    case 2:
+        return 256;
+    case 3:
+        return 512;
+    case 4:
+        return 1024;
+    default:
+        return 0;
+    }
+}
+
+bool
+UbSelectiveAckExtTph::EncodeBitmapBitCount(uint32_t bitCount, uint8_t& encoded)
+{
+    switch (bitCount)
+    {
+    case 64:
+        encoded = 0;
+        return true;
+    case 128:
+        encoded = 1;
+        return true;
+    case 256:
+        encoded = 2;
+        return true;
+    case 512:
+        encoded = 3;
+        return true;
+    case 1024:
+        encoded = 4;
+        return true;
+    default:
+        return false;
+    }
 }
 
 /*

@@ -9,6 +9,7 @@
 #include <fstream>
 #include <vector>
 #include <algorithm>
+#include <string>
 #include "ns3/ptr.h"
 #include "ns3/log.h"
 #include "ns3/net-device-container.h"
@@ -117,6 +118,59 @@ struct PortShutdownDrop {
     uint64_t sendNum;
 };
 
+enum class RetransFaultDirection : uint8_t {
+    ANY,
+    FORWARD,
+    REVERSE,
+};
+
+enum class RetransFaultPacketType : uint8_t {
+    ANY,
+    DATA,
+    TPACK,
+    TPSACK,
+    TPNAK,
+};
+
+enum class RetransFaultTriState : uint8_t {
+    ANY,
+    FALSE_VALUE,
+    TRUE_VALUE,
+};
+
+struct RetransFaultPacketInfo {
+    uint32_t taskId = 0;
+    uint32_t nodeId = 0;
+    uint32_t portId = 0;
+    RetransFaultDirection direction = RetransFaultDirection::ANY;
+    RetransFaultPacketType packetType = RetransFaultPacketType::ANY;
+    uint32_t psn = 0;
+    bool lastPacket = false;
+};
+
+struct RetransFaultRule {
+    string ruleId;
+    bool enabled = false;
+    bool anyTask = false;
+    uint32_t taskId = 0;
+    bool anyNode = false;
+    uint32_t nodeId = 0;
+    bool anyPort = false;
+    uint32_t portId = 0;
+    RetransFaultDirection direction = RetransFaultDirection::ANY;
+    RetransFaultPacketType packetType = RetransFaultPacketType::ANY;
+    bool anyPsn = false;
+    uint32_t psn = 0;
+    RetransFaultTriState lastPacket = RetransFaultTriState::ANY;
+    uint32_t dropCount = 0;
+    uint32_t delayNs = 0;
+    uint32_t delayCount = 0;
+    uint32_t matchCount = 0;
+    uint32_t droppedCount = 0;
+    uint32_t delayedCount = 0;
+    string comment;
+};
+
 /**
  * \class UbFault
  * \brief fault injection
@@ -131,6 +185,7 @@ public:
     map<uint32_t, PortDrop> dropMap;
     map<uint32_t, PortDrop> errorDropMap;
     map<uint32_t, PortShutdownDrop> shutdownDropMap;
+    vector<RetransFaultRule> retransFaultRules;
 
     UbFault();
 
@@ -141,6 +196,7 @@ public:
         map<uint32_t, FaultInfo> &faultMap, LowerDataRate &lowerDataRate, const string &cell, uint32_t taskId);
     void ReadShutDownParams(map<uint32_t, FaultInfo> &faultMap, const string &cell, uint32_t taskId);
     void InitFault(const string &filename);
+    void InitRetransFault(const string &filename);
     template <typename MapType, typename searchKey>
     bool MapTaskFind(MapType &srcMap, searchKey key)
     {
@@ -157,6 +213,10 @@ public:
     void SetPortCongestion(LowerDataRate lowerDataRate);
     int JudgeShutdownRangeToDeterminePacketDrop(uint64_t packetSize, uint32_t taskId, uint32_t nodeId, uint32_t portId);
     int SetPortShutdownAndUp(uint64_t packetSize, uint32_t taskId, uint32_t nodeId, uint32_t portId);
+    bool TryGetRetransFaultPacketInfo(
+        Ptr<Packet> packet, uint32_t nodeId, uint32_t portId, uint32_t taskId, RetransFaultPacketInfo &info);
+    bool MatchRetransFaultRule(const RetransFaultRule &rule, const RetransFaultPacketInfo &info) const;
+    int SetRetransFaultPacketDrop(Ptr<Packet> packet, uint32_t taskId, uint32_t nodeId, uint32_t portId);
     int FaultDiagnosis(Ptr<Packet> packet, uint32_t nodeId, uint32_t portId, Ptr<UbPort> ubPort);
     int FaultCallback(Ptr<Packet> packet, uint32_t nodeId, uint32_t portId, Ptr<UbPort> ubPort);
 };

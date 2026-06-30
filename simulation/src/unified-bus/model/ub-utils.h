@@ -25,7 +25,6 @@
 #include "ns3/network-module.h"
 #include "ns3/internet-module.h"
 #include "ns3/point-to-point-module.h"
-#include "ns3/applications-module.h"
 #include "ns3/ipv4-static-routing-helper.h"
 #include "ns3/config-store.h"
 #include "ns3/ub-caqm.h"
@@ -392,9 +391,8 @@ private:
 
     // static void TpRecvNotify(uint32_t packetUid, uint32_t psn, uint32_t src, uint32_t dst, uint32_t srcTpn,
     //                          uint32_t dstTpn, ns3::PacketType type, uint32_t size, uint32_t taskId,
-    //                          ns3::UbPacketTraceTag traceTag);
+    //                          std::string ackInfo, ns3::UbPacketTraceTag traceTag);
     static void TpRecvNotify(UbTpRecvTraceData data);
-
 
     static void LdstRecvNotify(uint32_t packetUid,
                                uint32_t src,

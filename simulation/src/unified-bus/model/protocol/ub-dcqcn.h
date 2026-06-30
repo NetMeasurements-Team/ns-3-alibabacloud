@@ -36,13 +36,15 @@ public:
 
     void OnTpAttached(Ptr<UbTransportChannel> tp) override;
     bool IsCcLimited(uint32_t bytes) override;
-    void OnReceiverDataPacketReceived(uint32_t psn,
+    void OnReceiverDataPacketReceived(uint64_t psn,
                                       uint32_t size,
                                       UbIpBasedNetworkHeader header) override;
-    UbCongestionExtTph OnReceiverPrepareAckCongestionHeader(uint32_t psnStart,
-                                                            uint32_t psnEnd) override;
+    UbCongestionExtTph OnReceiverPrepareAckCongestionHeader(uint64_t psnStart,
+                                                            uint64_t psnEnd) override;
     TpOpcode GetAckOpcode() const override;
     void OnSenderDataPacketSent(uint32_t psn, uint32_t size) override;
+    void OnSenderRetransmissionPacketSent(uint32_t psn, uint32_t size) override;
+    using UbCongestionControl::OnSenderCongestionNotification;
     void OnSenderCongestionNotification(TpOpcode opcode,
                                         uint32_t psn,
                                         UbCongestionExtTph header) override;
@@ -50,6 +52,7 @@ public:
 
     DataRate GetCurrentRateForTest() const { return m_currentRate; }
     DataRate GetTargetRateForTest() const { return m_targetRate; }
+    Time GetNextAvailableSendTimeForTest() const { return m_nextAvailableSendTime; }
     void ApplySyntheticCnpForTest();
 
 private:

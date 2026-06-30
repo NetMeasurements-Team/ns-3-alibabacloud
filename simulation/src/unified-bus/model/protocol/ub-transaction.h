@@ -57,6 +57,10 @@ namespace ns3 {
 
         bool ProcessWqeSegmentComplete(Ptr<UbWqeSegment> wqeSegment);
         void HandleInboundTaUnit(uint32_t localTpn, Ptr<UbWqeSegment> segment);
+        uint64_t DeriveRemoteAddressForTest(const Ptr<UbWqeSegment>& request) const
+        {
+            return DeriveRemoteAddress(request);
+        }
 
         void TriggerTpTransmit(uint32_t jettyNum);
 

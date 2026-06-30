@@ -79,7 +79,6 @@ bool UbController::CreateTp(const Connection& conn, Ptr<UbCongestionControl> con
         NS_LOG_WARN("No associated node found for UbController");
         currentNode = CreateObject<Node> ();
     }
-
     Ipv4Address sip = NodeIdToIp(conn.node1);
     Ipv4Address dip = NodeIdToIp(conn.node2);
 

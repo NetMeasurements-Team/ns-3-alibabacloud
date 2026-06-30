@@ -10,6 +10,8 @@ namespace ns3 {
 enum class PacketType {
     PACKET,
     ACK,
+    NAK,
+    SACK,
     CONTROL_FRAME
 };
 

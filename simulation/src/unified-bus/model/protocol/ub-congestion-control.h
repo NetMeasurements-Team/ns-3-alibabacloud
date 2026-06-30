@@ -43,6 +43,13 @@ public:
     // 发送端发包，更新数据
     virtual void OnSenderDataPacketSent(uint32_t psn, uint32_t size) {}
 
+    // 发送端重传包，更新不会把重传当成新数据的发送侧控制状态
+    virtual void OnSenderRetransmissionPacketSent(uint32_t psn, uint32_t size)
+    {
+        (void)psn;
+        (void)size;
+    }
+
     // 交换机在包进入目标出端口 backlog 时进行处理
     virtual void OnSwitchPostEnqueue(uint32_t inPort, uint32_t outPort, Ptr<Packet> p) {}
 
@@ -50,7 +57,7 @@ public:
     virtual void OnSwitchPostDequeue(uint32_t inPort, uint32_t outPort, Ptr<Packet> p) {}
 
     // 接收端接到数据包后记录数据
-    virtual void OnReceiverDataPacketReceived(uint32_t psn,
+    virtual void OnReceiverDataPacketReceived(uint64_t psn,
                                               uint32_t size,
                                               UbIpBasedNetworkHeader header)
     {
@@ -60,8 +67,8 @@ public:
     }
 
     // 接收端生成ack上的拥塞反馈头
-    virtual UbCongestionExtTph OnReceiverPrepareAckCongestionHeader(uint32_t psnStart,
-                                                                    uint32_t psnEnd)
+    virtual UbCongestionExtTph OnReceiverPrepareAckCongestionHeader(uint64_t psnStart,
+                                                                    uint64_t psnEnd)
     {
         throw std::runtime_error("Congestion Ctrl not available");
     }
@@ -74,6 +81,17 @@ public:
         (void)psn;
         (void)header;
         (void)opcode;
+    }
+
+    // TPSACK-CC 在同一个反馈里同时携带 CETPH 和选择性重传扣账摘要。
+    // SAETPH bitmap 由重传层消费，CC 层只看到归一化后的 CETPH 与 missing bytes。
+    virtual void OnSenderCongestionNotification(TpOpcode opcode,
+                                                uint32_t psn,
+                                                UbCongestionExtTph header,
+                                                uint32_t retransmitBytes)
+    {
+        (void)retransmitBytes;
+        OnSenderCongestionNotification(opcode, psn, header);
     }
 
     // 发送端TP在发送工作清空后进入空闲态

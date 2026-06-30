@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "ub-case-runner.h"
 
+#include "ns3/boolean.h"
 #include "ns3/command-line.h"
 #include "ns3/node-list.h"
-#include "ns3/boolean.h"
 #include "ns3/ub-app.h"
 #include "ns3/ub-traffic-gen.h"
 #include "ns3/ub-transport.h"
@@ -474,8 +474,8 @@ QuickExampleOptions ParseOptions(int argc, char* argv[])
     CommandLine cmd;
     cmd.Usage("Unified-bus config-driven user entry.\n"
               "Typical usage:\n"
-              "  recommended: ./ns3 run 'scratch/ub-quick-example --case-path=<case-dir>'\n"
-              "  example:     ./ns3 run 'src/unified-bus/examples/ub-quick-example --case-path=<case-dir>'\n"
+              "  recommended: python3.12 ./ns3 run --no-build 'scratch/ub-quick-example --case-path=<case-dir>'\n"
+              "  example:     python3.12 ./ns3 run --no-build 'src/unified-bus/examples/ub-quick-example --case-path=<case-dir>'\n"
               "  MPI note:    traffic.csv / UbTrafficGen is single-process only in the current version.\n");
     cmd.AddValue("test", "Enable regression-test style output", options.test);
     cmd.AddValue("mtp-threads",
@@ -591,6 +591,7 @@ PhaseTiming RunScenario(const QuickExampleOptions& options,
     RngSeedManager::SetSeed(options.rngRun);
 
     timing.simulationStart = std::chrono::high_resolution_clock::now();
+    UbUtils::ResetRuntimeDropDiagnostics();
     BuildScenarioFromConfig(options.configPath);
     ResetDropAbortState();
     GetDropAbortState().retransEnabled = IsRetransEnabledForRun();

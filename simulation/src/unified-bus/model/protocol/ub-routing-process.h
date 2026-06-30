@@ -3,9 +3,9 @@
 #define UB_ROUTING_PROCESS_H
 
 #include "ns3/node.h"
+#include <map>
 #include <set>
 #include <memory>
-
 namespace ns3 {
 
 class UbQueueManager;
@@ -38,6 +38,20 @@ public:
     // 添加路由条目
     void AddShortestRoute(const uint32_t destIP, const std::vector<uint16_t>& outPorts);
     void AddOtherRoute(const uint32_t destIP, const std::vector<uint16_t>& outPorts);
+    void AddShortestRouteRange(uint32_t startNodeId,
+                               uint32_t endNodeId,
+                               const std::vector<uint16_t>& outPorts);
+    void AddOtherRouteRange(uint32_t startNodeId,
+                            uint32_t endNodeId,
+                            const std::vector<uint16_t>& outPorts);
+    void AddShortestRouteRange(uint32_t startNodeId,
+                               uint32_t endNodeId,
+                               uint32_t dstPortId,
+                               const std::vector<uint16_t>& outPorts);
+    void AddOtherRouteRange(uint32_t startNodeId,
+                            uint32_t endNodeId,
+                            uint32_t dstPortId,
+                            const std::vector<uint16_t>& outPorts);
     
     void GetShortestOutPorts(const uint32_t destIP, std::vector<uint16_t>& outPorts);
     void GetOtherOutPorts(const uint32_t destIP, std::vector<uint16_t>& outPorts);
@@ -56,6 +70,9 @@ public:
     bool RemoveShortestRoute(const uint32_t destIP);
     bool RemoveOtherRoute(const uint32_t destIP);
 private:
+    using RouteRangeMap = std::map<uint32_t, std::shared_ptr<std::vector<uint16_t> > >;
+    using RouteRangeByPortMap = std::map<uint32_t, RouteRangeMap>;
+
     struct VectorHash {
         size_t operator()(const std::vector<uint16_t>& v) const
         {
@@ -76,6 +93,22 @@ private:
     uint32_t m_nodeId;
     UbRoutingAlgorithm m_routingAlgorithm = UbRoutingAlgorithm::HASH;
     uint64_t CalcHash(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport, uint8_t priority, uint32_t salt);
+    std::shared_ptr<std::vector<uint16_t> > GetOrCreatePortSet(const std::vector<uint16_t>& ports);
+    void AddRouteRange(RouteRangeByPortMap& routeRangesByPort,
+                       uint32_t startNodeId,
+                       uint32_t endNodeId,
+                       uint32_t dstPortId,
+                       const std::vector<uint16_t>& outPorts);
+    void AddRouteRangeToMap(RouteRangeMap& routeRanges,
+                       uint32_t startNodeId,
+                       uint32_t endNodeId,
+                       const std::vector<uint16_t>& outPorts);
+    bool GetRangeOutPortsFromMap(const RouteRangeMap& routeRanges,
+                                 uint32_t nodeId,
+                                 std::vector<uint16_t>& outPorts);
+    void GetRangeOutPorts(const RouteRangeByPortMap& routeRangesByPort,
+                          const uint32_t destIP,
+                          std::vector<uint16_t>& outPorts);
 
     // 全局端口集合池：存储所有唯一的端口集合
     std::unordered_map<std::vector<uint16_t>, std::shared_ptr<std::vector<uint16_t> >, VectorHash> m_portSetPool;
@@ -83,6 +116,8 @@ private:
     // 路由表：目的IP -> 共享的端口集合指针
     std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint16_t> > > m_rtShortest;
     std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint16_t> > > m_rtOther;
+    RouteRangeByPortMap m_rtShortestRanges;
+    RouteRangeByPortMap m_rtOtherRanges;
     
     // 辅助函数：标准化端口集合（排序去重）
     std::vector<uint16_t> normalizePorts(const std::vector<uint16_t>& ports)

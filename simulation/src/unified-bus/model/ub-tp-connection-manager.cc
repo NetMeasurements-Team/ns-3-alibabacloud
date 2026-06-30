@@ -564,11 +564,12 @@ uint32_t TpConnectionManager::CreateNewTp(Connection conn)
     // sendCtrl->CreateTp(conn.node1, conn.node2, conn.port1, conn.port2,
     //                    conn.priority, conn.tpn1, conn.tpn2, sendHostCaqm);
     sendCtrl->CreateTp(conn, sendHostCaqm);
+    Connection conn_inv = {conn.node2, conn.port2, conn.tpn2, conn.node1, conn.port1, conn.tpn1, conn.priority, conn.metrics};
     Simulator::ScheduleWithContext(conn.node2,
                                    Time(0),
                                    &CreateDeviceTpOnNode,
                                    conn.node2,
-                                   conn);
+                                   conn_inv);
     return conn.tpn1;
 }
 
@@ -602,11 +603,12 @@ uint32_t TpConnectionManager::ReconstructTp(Connection conn)
         sendCtrl->CreateTp(conn, sendHostCaqm);
     }
     if (!recvCtrl->IsTPExists(conn.tpn2)) {
+        Connection conn_inv = {conn.node2, conn.port2, conn.tpn2, conn.node1, conn.port1, conn.tpn1, conn.priority, conn.metrics};
         Simulator::ScheduleWithContext(conn.node2,
                                        Time(0),
                                        &CreateDeviceTpOnNode,
                                        conn.node2,
-                                       conn);
+                                       conn_inv);
     }
     return conn.tpn1;
 }

@@ -2,12 +2,169 @@
 #include "ns3/ub-fault.h"
 #include "ns3/node-list.h"
 #include "ns3/node.h"
+#include "ns3/udp-header.h"
+#include "ns3/ub-header.h"
+
+#include <cctype>
+#include <stdexcept>
+
 using namespace std;
 using namespace utils;
 namespace ns3 {
 
 NS_OBJECT_ENSURE_REGISTERED(UbFault);
 NS_LOG_COMPONENT_DEFINE("UbFault");
+
+namespace {
+
+string
+Trim(const string& value)
+{
+    const size_t begin = value.find_first_not_of(" \t\r\n");
+    if (begin == string::npos) {
+        return "";
+    }
+    const size_t end = value.find_last_not_of(" \t\r\n");
+    return value.substr(begin, end - begin + 1);
+}
+
+string
+ToLowerCopy(string value)
+{
+    transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(tolower(ch));
+    });
+    return value;
+}
+
+vector<string>
+SplitCsvRow(const string& line)
+{
+    vector<string> fields;
+    string field;
+    stringstream ss(line);
+    while (getline(ss, field, ',')) {
+        fields.push_back(Trim(field));
+    }
+    return fields;
+}
+
+bool
+IsAnyField(const string& value)
+{
+    const string normalized = ToLowerCopy(Trim(value));
+    return normalized.empty() || normalized == "any" || normalized == "*";
+}
+
+bool
+ParseEnabled(const string& value)
+{
+    const string normalized = ToLowerCopy(Trim(value));
+    return normalized == "true" || normalized == "1" || normalized == "yes" || normalized == "y";
+}
+
+void
+ParseOptionalUint(const string& value, bool& anyValue, uint32_t& parsedValue)
+{
+    anyValue = IsAnyField(value);
+    if (anyValue) {
+        parsedValue = 0;
+        return;
+    }
+    parsedValue = static_cast<uint32_t>(stoul(value));
+}
+
+RetransFaultDirection
+ParseRetransFaultDirection(const string& value)
+{
+    const string normalized = ToLowerCopy(Trim(value));
+    if (normalized == "forward") {
+        return RetransFaultDirection::FORWARD;
+    }
+    if (normalized == "reverse") {
+        return RetransFaultDirection::REVERSE;
+    }
+    return RetransFaultDirection::ANY;
+}
+
+RetransFaultPacketType
+ParseRetransFaultPacketType(const string& value)
+{
+    const string normalized = ToLowerCopy(Trim(value));
+    if (normalized == "data") {
+        return RetransFaultPacketType::DATA;
+    }
+    if (normalized == "tpack") {
+        return RetransFaultPacketType::TPACK;
+    }
+    if (normalized == "tpsack") {
+        return RetransFaultPacketType::TPSACK;
+    }
+    if (normalized == "tpnak") {
+        return RetransFaultPacketType::TPNAK;
+    }
+    return RetransFaultPacketType::ANY;
+}
+
+RetransFaultTriState
+ParseRetransFaultTriState(const string& value)
+{
+    const string normalized = ToLowerCopy(Trim(value));
+    if (normalized == "true" || normalized == "1" || normalized == "yes") {
+        return RetransFaultTriState::TRUE_VALUE;
+    }
+    if (normalized == "false" || normalized == "0" || normalized == "no") {
+        return RetransFaultTriState::FALSE_VALUE;
+    }
+    return RetransFaultTriState::ANY;
+}
+
+string
+BuildRetransFaultFilename(const string& faultFilename)
+{
+    const size_t slash = faultFilename.find_last_of("/\\");
+    if (slash == string::npos) {
+        return "retrans_fault.csv";
+    }
+    return faultFilename.substr(0, slash + 1) + "retrans_fault.csv";
+}
+
+RetransFaultPacketType
+DecodeRetransFaultPacketType(uint8_t opcode)
+{
+    if (opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_RELIABLE_TA) ||
+        opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_UNRELIABLE_TA)) {
+        return RetransFaultPacketType::DATA;
+    }
+    if (opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_ACK_WITHOUT_CETPH) ||
+        opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_ACK_WITH_CETPH)) {
+        return RetransFaultPacketType::TPACK;
+    }
+    if (opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_NAK_WITHOUT_CETPH)) {
+        return RetransFaultPacketType::TPNAK;
+    }
+    if (opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_SACK_WITHOUT_CETPH) ||
+        opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_SACK_WITH_CETPH)) {
+        return RetransFaultPacketType::TPSACK;
+    }
+    return RetransFaultPacketType::ANY;
+}
+
+RetransFaultDirection
+DirectionFromPacketType(RetransFaultPacketType packetType)
+{
+    if (packetType == RetransFaultPacketType::DATA) {
+        return RetransFaultDirection::FORWARD;
+    }
+    if (packetType == RetransFaultPacketType::TPACK ||
+        packetType == RetransFaultPacketType::TPSACK ||
+        packetType == RetransFaultPacketType::TPNAK) {
+        return RetransFaultDirection::REVERSE;
+    }
+    return RetransFaultDirection::ANY;
+}
+
+} // namespace
 
 /*********************
  * UbFault
@@ -142,6 +299,63 @@ void UbFault::InitFault(const string &filename)
                                << ",erorDropRate:" << faultMap[taskId].erorDropRate);
     }
     file.close();
+    InitRetransFault(BuildRetransFaultFilename(filename));
+}
+
+void
+UbFault::InitRetransFault(const string &filename)
+{
+    ifstream file(filename);
+    if (!file.is_open()) {
+        NS_LOG_DEBUG("Can not open retrans fault File: " << filename);
+        return;
+    }
+
+    NS_LOG_INFO("Init retrans fault module: " << filename);
+    string line;
+    getline(file, line); // header
+    uint32_t lineNo = 1;
+    while (getline(file, line)) {
+        lineNo++;
+        if (line.empty() || line[0] == '#' || line.find_first_not_of(" \t") == string::npos) {
+            continue;
+        }
+        vector<string> fields = SplitCsvRow(line);
+        if (fields.size() < 11) {
+            NS_LOG_WARN("Invalid retrans fault config at line " << lineNo
+                        << ": expected at least 11 columns, got " << fields.size());
+            continue;
+        }
+
+        try {
+            RetransFaultRule rule;
+            rule.ruleId = fields[0];
+            rule.enabled = ParseEnabled(fields[1]);
+            ParseOptionalUint(fields[2], rule.anyTask, rule.taskId);
+            ParseOptionalUint(fields[3], rule.anyNode, rule.nodeId);
+            ParseOptionalUint(fields[4], rule.anyPort, rule.portId);
+            rule.direction = ParseRetransFaultDirection(fields[5]);
+            rule.packetType = ParseRetransFaultPacketType(fields[6]);
+            ParseOptionalUint(fields[7], rule.anyPsn, rule.psn);
+            rule.lastPacket = ParseRetransFaultTriState(fields[8]);
+            rule.dropCount = static_cast<uint32_t>(stoul(fields[9]));
+            if (fields.size() >= 13) {
+                rule.delayNs = static_cast<uint32_t>(stoul(fields[10]));
+                rule.delayCount = static_cast<uint32_t>(stoul(fields[11]));
+                rule.comment = fields[12];
+            } else {
+                rule.comment = fields.size() > 10 ? fields[10] : "";
+            }
+            retransFaultRules.push_back(rule);
+            NS_LOG_DEBUG("Loaded retrans fault rule: " << rule.ruleId
+                         << " enabled:" << rule.enabled
+                         << " dropCount:" << rule.dropCount
+                         << " delayNs:" << rule.delayNs
+                         << " delayCount:" << rule.delayCount);
+        } catch (const std::exception& e) {
+            NS_LOG_WARN("Invalid retrans fault config at line " << lineNo << ": " << e.what());
+        }
+    }
 }
 // compute packetSize
 uint32_t UbFault::GetPacketSize(Ptr<Packet> packet)
@@ -306,6 +520,144 @@ int UbFault::SetPortShutdownAndUp(uint64_t packetSize, uint32_t taskId, uint32_t
 
     return ret;
 }
+
+bool
+UbFault::TryGetRetransFaultPacketInfo(Ptr<Packet> packet,
+                                      uint32_t nodeId,
+                                      uint32_t portId,
+                                      uint32_t taskId,
+                                      RetransFaultPacketInfo &info)
+{
+    Ptr<Packet> copy = packet->Copy();
+    UbDatalinkPacketHeader dataLinkHeader;
+    if (copy->GetSize() < dataLinkHeader.GetSerializedSize()) {
+        return false;
+    }
+    copy->RemoveHeader(dataLinkHeader);
+    if (dataLinkHeader.GetConfig() != static_cast<uint8_t>(UbDatalinkHeaderConfig::PACKET_IPV4)) {
+        return false;
+    }
+
+    UbIpBasedNetworkHeader networkHeader;
+    if (copy->GetSize() < networkHeader.GetSerializedSize()) {
+        return false;
+    }
+    copy->RemoveHeader(networkHeader);
+
+    Ipv4Header ipv4Header;
+    if (copy->GetSize() < ipv4Header.GetSerializedSize()) {
+        return false;
+    }
+    copy->RemoveHeader(ipv4Header);
+
+    UdpHeader udpHeader;
+    if (copy->GetSize() < udpHeader.GetSerializedSize()) {
+        return false;
+    }
+    copy->RemoveHeader(udpHeader);
+
+    UbTransportHeader transportHeader;
+    if (copy->GetSize() < transportHeader.GetSerializedSize()) {
+        return false;
+    }
+    copy->PeekHeader(transportHeader);
+
+    RetransFaultPacketType packetType = DecodeRetransFaultPacketType(transportHeader.GetTPOpcode());
+    if (packetType == RetransFaultPacketType::ANY) {
+        return false;
+    }
+
+    info.taskId = taskId;
+    info.nodeId = nodeId;
+    info.portId = portId;
+    info.packetType = packetType;
+    info.direction = DirectionFromPacketType(packetType);
+    info.psn = transportHeader.GetPsn();
+    info.lastPacket = transportHeader.GetLastPacket();
+    return true;
+}
+
+bool
+UbFault::MatchRetransFaultRule(const RetransFaultRule &rule, const RetransFaultPacketInfo &info) const
+{
+    if (!rule.enabled || (rule.dropCount == 0 && rule.delayCount == 0)) {
+        return false;
+    }
+    if (!rule.anyTask && rule.taskId != info.taskId) {
+        return false;
+    }
+    if (!rule.anyNode && rule.nodeId != info.nodeId) {
+        return false;
+    }
+    if (!rule.anyPort && rule.portId != info.portId) {
+        return false;
+    }
+    if (rule.direction != RetransFaultDirection::ANY && rule.direction != info.direction) {
+        return false;
+    }
+    if (rule.packetType != RetransFaultPacketType::ANY && rule.packetType != info.packetType) {
+        return false;
+    }
+    if (!rule.anyPsn && rule.psn != info.psn) {
+        return false;
+    }
+    if (rule.lastPacket == RetransFaultTriState::TRUE_VALUE && !info.lastPacket) {
+        return false;
+    }
+    if (rule.lastPacket == RetransFaultTriState::FALSE_VALUE && info.lastPacket) {
+        return false;
+    }
+    return true;
+}
+
+int
+UbFault::SetRetransFaultPacketDrop(Ptr<Packet> packet, uint32_t taskId, uint32_t nodeId, uint32_t portId)
+{
+    if (retransFaultRules.empty()) {
+        return 0;
+    }
+
+    RetransFaultPacketInfo info;
+    if (!TryGetRetransFaultPacketInfo(packet, nodeId, portId, taskId, info)) {
+        return 0;
+    }
+
+    for (auto &rule : retransFaultRules) {
+        if (!MatchRetransFaultRule(rule, info)) {
+            continue;
+        }
+
+        rule.matchCount++;
+        if (rule.droppedCount < rule.dropCount) {
+            rule.droppedCount++;
+            NS_LOG_DEBUG("Retrans fault drop."
+                         << " ruleId:" << rule.ruleId
+                         << " taskId:" << taskId
+                         << " nodeId:" << nodeId
+                         << " portId:" << portId
+                         << " psn:" << info.psn
+                         << " matchCount:" << rule.matchCount
+                         << " droppedCount:" << rule.droppedCount);
+            return -1;
+        }
+        if (rule.delayedCount < rule.delayCount) {
+            rule.delayedCount++;
+            NS_LOG_DEBUG("Retrans fault detached delay."
+                         << " ruleId:" << rule.ruleId
+                         << " taskId:" << taskId
+                         << " nodeId:" << nodeId
+                         << " portId:" << portId
+                         << " psn:" << info.psn
+                         << " matchCount:" << rule.matchCount
+                         << " delayedCount:" << rule.delayedCount
+                         << " delayNs:" << rule.delayNs);
+            return -static_cast<int>(rule.delayNs) - 2;
+        }
+    }
+
+    return 0;
+}
+
 int UbFault::FaultDiagnosis(Ptr<Packet> packet, uint32_t nodeId, uint32_t portId, Ptr<UbPort> ubPort)
 {
     uint64_t packetSize = GetPacketSize(packet);
@@ -315,6 +667,12 @@ int UbFault::FaultDiagnosis(Ptr<Packet> packet, uint32_t nodeId, uint32_t portId
     packet->PeekPacketTag(flowTag);
     uint32_t taskId = flowTag.GetFlowId();
     int ret = 0;
+    if (retrieved_sw->GetNodeType() == UB_SWITCH) {
+        ret = SetRetransFaultPacketDrop(packet, taskId, nodeId, portId);
+        if (ret < 0) {
+            return ret;
+        }
+    }
     if (retrieved_sw->GetNodeType() == UB_SWITCH && MapTaskFind(faultMap, taskId) && packetSize > 0) {
         switch (faultMap[taskId].faultType) {
             case FaultType::DROPPACKET:
@@ -341,6 +699,10 @@ int UbFault::FaultCallback(Ptr<Packet> packet, uint32_t nodeId, uint32_t portId,
     int ret = FaultDiagnosis(packet, nodeId, portId, ubPort);
     if (ret >= 0) {
         Simulator::ScheduleNow(&UbPort::TransmitPacket, ubPort, packet, Time(ret));
+    } else if (ret < -1) {
+        Time delay = NanoSeconds(static_cast<uint64_t>(-ret - 2));
+        Simulator::Schedule(Time(0), &UbPort::TransmitComplete, ubPort);
+        Simulator::Schedule(delay, &UbPort::TransmitPacketDetached, ubPort, packet);
     } else {
         Simulator::Schedule(Time(0), &UbPort::TransmitComplete, ubPort);
     }

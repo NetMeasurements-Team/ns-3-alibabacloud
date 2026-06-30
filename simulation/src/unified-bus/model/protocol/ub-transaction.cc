@@ -408,7 +408,7 @@ Ptr<UbWqeSegment> UbTransaction::ExecuteRemoteWriteAndBuildAck(uint32_t localTpn
     response->SetOrderType(request->GetOrderType());
     response->SetJettyNum(request->GetOriginJettyNum());
     response->SetTaMsn(0);
-    response->SetTaSsn(static_cast<uint16_t>(request->GetRequestTassn()));
+    response->SetTaSsn(request->GetRequestTassn());
     response->SetSegmentKind(UbTransactionSegmentKind::RESPONSE);
     response->SetOriginJettyNum(request->GetOriginJettyNum());
     response->SetRequestTassn(request->GetRequestTassn());
@@ -446,7 +446,7 @@ Ptr<UbWqeSegment> UbTransaction::ExecuteRemoteReadAndBuildResponse(uint32_t loca
     response->SetOrderType(request->GetOrderType());
     response->SetJettyNum(request->GetOriginJettyNum());
     response->SetTaMsn(0);
-    response->SetTaSsn(static_cast<uint16_t>(request->GetRequestTassn()));
+    response->SetTaSsn(request->GetRequestTassn());
     response->SetSegmentKind(UbTransactionSegmentKind::RESPONSE);
     response->SetOriginJettyNum(request->GetOriginJettyNum());
     response->SetRequestTassn(request->GetRequestTassn());

@@ -174,6 +174,18 @@ namespace ns3 {
 
         uint32_t GetNodeId() { return m_nodeId; }
 
+        void SetTaSsnSendWindowForTest(uint32_t sndUna, uint32_t sndNxt)
+        {
+            m_taSsnSndUna = sndUna;
+            m_taSsnSndNxt = sndNxt;
+            m_ssnAckWindow.Reset(m_taSsnSndUna);
+        }
+
+        uint32_t GetTaSsnSndUnaForTest() const
+        {
+            return m_taSsnSndUna;
+        }
+
     private:
         Ptr<UbTransaction> GetTransaction();
         void DoDispose() override;
@@ -191,7 +203,7 @@ namespace ns3 {
 
         // ========== Jetty队列信息 ==========
         // 当前只在WQE推入jetty中才会更新
-        uint32_t m_taMsnCnt = 0; // 当前jetty层WQE计数器，数字上等于目前已经从client拿到的所有WQE数量
+        uint64_t m_taMsnCnt = 0; // 当前jetty层WQE计数器，数字上等于目前已经从client拿到的所有WQE数量
 
         // 当前jetty WQE Segment计数器，数字上等于目前已经从client拿到的所有WQE产生的WQE segment数量
         uint32_t m_taSsnCnt = 0;

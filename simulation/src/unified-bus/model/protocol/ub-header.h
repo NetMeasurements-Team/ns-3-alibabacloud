@@ -5,6 +5,8 @@
 #include "ns3/header.h"
 #include "ns3/ub-datatype.h"
 
+#include <array>
+
 namespace ns3 {
 /**
  * \ingroup ub-header
@@ -552,6 +554,8 @@ public:
     void SetErrorFlag(bool errorFlag);
     void SetPsn(uint32_t psn);
     void SetTpMsn(uint32_t tpMsn);
+    void SetRspSt(uint8_t rspSt);
+    void SetRspInfo(uint8_t rspInfo);
 
     // Getters for header fields
     bool GetLastPacket() const;
@@ -563,6 +567,8 @@ public:
     bool GetErrorFlag() const;
     uint32_t GetPsn() const;
     uint32_t GetTpMsn() const;
+    uint8_t GetRspSt() const;
+    uint8_t GetRspInfo() const;
 
     // 检查头字段是否有效的方法
     bool IsValidOpcode() const;
@@ -590,6 +596,46 @@ private:
     uint32_t m_tpMsn = 0xFFFFFF;  // 24 bits (stored in uint32_t)
 };
 
+
+/**
+ * \ingroup ub-header
+ * \brief UB Selective Acknowledge Extended Transport Header (SAETPH)
+ */
+class UbSelectiveAckExtTph : public Header {
+public:
+    UbSelectiveAckExtTph();
+    virtual ~UbSelectiveAckExtTph();
+
+    static TypeId GetTypeId(void);
+    TypeId GetInstanceTypeId(void) const override;
+    void Print(std::ostream& os) const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    uint32_t GetSerializedSize(void) const override;
+
+    void SetBitmapBitCount(uint32_t bitCount);
+    uint32_t GetBitmapBitCount() const;
+    uint8_t GetEncodedBitmapSize() const;
+    void SetMaxRcvPsn(uint32_t psn);
+    uint32_t GetMaxRcvPsn() const;
+    void SetBitmapBit(uint32_t offset, bool value);
+    bool GetBitmapBit(uint32_t offset) const;
+
+    static bool IsSupportedBitmapBitCount(uint32_t bitCount);
+    static bool IsSupportedEncodedBitmapSize(uint8_t encoded);
+
+private:
+    static constexpr uint32_t kMaxBitmapBits = 1024;
+    static constexpr uint32_t kMaxBitmapBytes = kMaxBitmapBits / 8;
+    static constexpr uint32_t kFixedHeaderBytes = 4;
+
+    static uint32_t DecodeBitmapBitCount(uint8_t encoded);
+    static bool EncodeBitmapBitCount(uint32_t bitCount, uint8_t& encoded);
+
+    uint8_t m_bitmapSizeEncoded{0};
+    uint32_t m_maxRcvPsn{0};
+    std::array<uint8_t, kMaxBitmapBytes> m_bitmap{};
+};
 
 /**
  * \ingroup ub-header

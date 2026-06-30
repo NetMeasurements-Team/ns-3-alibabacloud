@@ -123,7 +123,7 @@ Ptr<UbWqe> UbFunction::CreateWqe(uint32_t src,
     ubWqe->SetRemoteAddress(0);
     ubWqe->SetNeedsTransactionResponse(type == TaOpcode::TA_OPCODE_WRITE ||
                                        type == TaOpcode::TA_OPCODE_READ);
-    ubWqe->SetLogicalBytes(size);
+    ubWqe->SetResLenBytes(size);
     ubWqe->SetPayloadBytes(type == TaOpcode::TA_OPCODE_READ ? 0 : size);
     ubWqe->SetCarrierBytes(type == TaOpcode::TA_OPCODE_READ ? ubWqe->GetTaSsnSize() : size);
     return ubWqe;
@@ -304,7 +304,7 @@ Ptr<UbWqeSegment> UbJetty::GenWqeSegment(Ptr<UbWqe> wqe, uint32_t segmentSize)
     segment->SetResponseBytes(wqe->GetResponseBytes());
     segment->SetRemoteAddress(wqe->GetRemoteAddress());
     segment->SetNeedsTransactionResponse(wqe->NeedsTransactionResponse());
-    segment->SetLogicalBytes(segmentSize);
+    segment->SetResLenBytes(segmentSize);
     segment->SetPayloadBytes(wqe->GetType() == TaOpcode::TA_OPCODE_READ ? 0 : segmentSize);
     segment->SetCarrierBytes(wqe->GetType() == TaOpcode::TA_OPCODE_READ ? 1 : segmentSize);
 
@@ -335,7 +335,7 @@ void UbJetty::PushWqe(Ptr<UbWqe> ubWqe)
     ubWqe->SetRemoteAddress(0);
     ubWqe->SetNeedsTransactionResponse(ubWqe->GetType() == TaOpcode::TA_OPCODE_WRITE ||
                                        ubWqe->GetType() == TaOpcode::TA_OPCODE_READ);
-    ubWqe->SetLogicalBytes(ubWqe->GetSize());
+    ubWqe->SetResLenBytes(ubWqe->GetSize());
     ubWqe->SetPayloadBytes(ubWqe->GetType() == TaOpcode::TA_OPCODE_READ ? 0 : ubWqe->GetSize());
     ubWqe->SetCarrierBytes(ubWqe->GetType() == TaOpcode::TA_OPCODE_READ ? ssnSize
                                                                          : ubWqe->GetSize());

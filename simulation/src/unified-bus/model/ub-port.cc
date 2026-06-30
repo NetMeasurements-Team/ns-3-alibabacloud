@@ -461,6 +461,34 @@ void UbPort::TransmitPacket(Ptr<Packet> packet, Time delay)
     return;
 }
 
+void
+UbPort::TransmitPacketDetached(Ptr<Packet> packet)
+{
+    PortTxNotify(GetNode()->GetId(), m_portId, packet->GetSize());
+    NS_LOG_DEBUG("[UbPort detached send] nodetype: " << g_node_type_map[GetNode()->GetObject<UbSwitch>()->GetNodeType()]
+        << " NodeId: " << GetNode()->GetId() << " PortId: " << m_portId << " send to:"
+        << " NodeId: " << m_channel->GetDestination(this)->GetNode()->GetId()
+        << " PortId: " << m_channel->GetDestination(this)->GetIfIndex()
+        << " PacketUid: " << packet->GetUid());
+    if (m_pktTraceEnabled) {
+        UbPacketTraceTag tag;
+        packet->RemovePacketTag(tag);
+        tag.AddPortSendTrace(GetNode()->GetId(), m_portId, Simulator::Now().GetNanoSeconds());
+        packet->AddPacketTag(tag);
+    }
+
+    Time txTime = m_bps.CalculateBytesTxTime(packet->GetSize());
+    bool result = m_channel->TransmitStart(packet, this, txTime);
+    if (result == false) {
+        NS_LOG_WARN("Detached channel transmission failed! Packet dropped at Node "
+                    << GetNode()->GetId() << " Port " << m_portId);
+        return;
+    }
+
+    TraComEventNotify(packet, txTime);
+    UpdateTxBytes(packet->GetSize());
+}
+
 void UbPort::Receive(Ptr<Packet> packet)
 {
     NS_LOG_DEBUG("[UbPort recv] nodetype: " << g_node_type_map[GetNode()->GetObject<UbSwitch>()->GetNodeType()]
