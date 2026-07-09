@@ -1,4 +1,5 @@
 #include "ns3/ipv4.h"
+#include "ns3/log.h"
 #include "ns3/packet.h"
 #include "ns3/ipv4-header.h"
 #include "ns3/pause-header.h"
@@ -10,8 +11,11 @@
 #include "qbb-net-device.h"
 #include "ppp-header.h"
 #include "ns3/int-header.h"
+#include "ns3/sr-header.h"
 #include "ns3/simulator.h"
 #include <cmath>
+
+#define DEBUG 1
 
 namespace ns3 {
 NS_LOG_COMPONENT_DEFINE("SwitchNode");
@@ -57,6 +61,11 @@ TypeId SwitchNode::GetTypeId (void)
             BooleanValue(false),
             MakeBooleanAccessor(&SwitchNode::m_packetSpraying),
             MakeBooleanChecker())
+    .AddAttribute("SourceRouting",
+            "Set to true to forward purely by the packet's Source Routing Header, bypassing ECMP/spraying",
+            BooleanValue(false),
+            MakeBooleanAccessor(&SwitchNode::m_sourceRouting),
+            MakeBooleanChecker())
   ;
   return tid;
 }
@@ -79,6 +88,20 @@ SwitchNode::SwitchNode(){
 }
 
 int SwitchNode::GetOutDev(Ptr<const Packet> p, CustomHeader &ch){
+	// Source routing bypasses the ECMP table entirely: the packet's SRH
+	// carries the *node id* of the next hop to reach at this position in the
+	// path, chosen by the source. Resolve it to a local egress port via
+	// m_srNextHop -- no hashing, no randomness, but (unlike an egress-port
+	// segment) a lookup is unavoidable since a node id isn't inherently a
+	// local port number.
+
+	if (m_sourceRouting && ch.srh.present){
+		auto it = m_srNextHop.find(ch.srh.segs[ch.srh.ptr]);
+		if (it == m_srNextHop.end())
+			return -1; // segment doesn't name a direct neighbor of this switch
+		return it->second;
+	}
+
 	// look up entries
 	auto entry = m_rtTable.find(ch.dip);
 
@@ -137,11 +160,20 @@ void SwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch){
 	if (idx >= 0){
 		NS_ASSERT_MSG(m_devices[idx]->IsLinkUp(), "The routing table look up should return link that is up");
 
+		// Advance the SRH pointer to the next segment before forwarding, the
+		// same raw-buffer-patch idiom used below for the INT header: no
+		// header remove/re-add, just the one byte that changed written
+		// straight into the packet's buffer.
+		if (m_sourceRouting && ch.srh.present){
+			uint8_t* buf = p->GetBuffer();
+			SrHeader::AdvancePtrInPlace(&buf[PppHeader::GetStaticSize() + 20]);
+		}
+
 		// determine the qIndex
 		uint32_t qIndex;
 		if (ch.l3Prot == 0xFF || ch.l3Prot == 0xFE || (m_ackHighPrio && (ch.l3Prot == 0xFD || ch.l3Prot == 0xFC))){  //QCN or PFC or NACK, go highest priority
 			qIndex = 0;
-		}else{
+		} else {
 			qIndex = (ch.l3Prot == 0x06 ? 1 : ch.udp.pg); // if TCP, put to queue 1
 		}
 		// std::cout << "qIndex is: " << qIndex << std::endl;
@@ -214,6 +246,10 @@ void SwitchNode::AddTableEntry(Ipv4Address &dstAddr, uint32_t intf_idx){
 	m_rtTable[dip].push_back(intf_idx);
 }
 
+void SwitchNode::AddSrNextHopEntry(uint32_t neighborNodeId, uint32_t intf_idx){
+	m_srNextHop[neighborNodeId] = intf_idx;
+}
+
 void SwitchNode::ClearTable(){
 	m_rtTable.clear();
 }
@@ -249,8 +285,22 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
 	}
 	if (1){
 		uint8_t* buf = p->GetBuffer();
-		if (buf[PppHeader::GetStaticSize() + 9] == 0x11){ // udp packet
-			IntHeader *ih = (IntHeader*)&buf[PppHeader::GetStaticSize() + 20 + 8 + 6]; // ppp, ip, udp, SeqTs, INT
+		// Locate the UDP header, skipping over the SRH when source routing
+		// put one there. Without this, a source-routed UDP packet's IP
+		// protocol byte reads as SrHeader::PROTO_NUMBER (not 0x11) and this
+		// whole block would silently stop firing, breaking HPCC/PINT INT
+		// telemetry (cc_mode 3/10) for source-routed traffic.
+		uint32_t udpOffset = PppHeader::GetStaticSize() + 20; // right after ppp+ip
+		bool isUdp = false;
+		if (buf[PppHeader::GetStaticSize() + 9] == 0x11){ // udp packet, no SRH
+			isUdp = true;
+		} else if (m_sourceRouting && buf[PppHeader::GetStaticSize() + 9] == SrHeader::PROTO_NUMBER
+				&& buf[udpOffset] == 0x11){ // source-routed udp packet: SRH's own nextHeader byte
+			isUdp = true;
+			udpOffset += SrHeader::GetStaticSize();
+		}
+		if (isUdp){
+			IntHeader *ih = (IntHeader*)&buf[udpOffset + 8 + 6]; // ppp, ip, (srh), udp, SeqTs, INT
 			Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(m_devices[ifIndex]);
 			if (m_ccMode == 3){ // HPCC
 				ih->PushHop(Simulator::Now().GetTimeStep(), m_txBytes[ifIndex], dev->GetQueue()->GetNBytesTotal(), dev->GetDataRate().GetBitRate());

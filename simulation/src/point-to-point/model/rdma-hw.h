@@ -53,6 +53,7 @@ class RdmaHw : public Object
     bool m_backto0;
     bool m_var_win;
     bool m_rateBound;
+    bool m_sourceRouting;
     uint32_t m_total_pause_times;
     uint32_t m_paused_times;
     /** list of running nic controlled by this RdmaHw */
@@ -91,6 +92,22 @@ class RdmaHw : public Object
     typedef Callback<void, Ptr<RdmaQueuePair>, const RdmaQueuePair::RdmaMessage&>
         MessageCompleteCallback;
     MessageCompleteCallback m_messageCompleteCallback;
+    // Builds the Source Routing Header segment list (node id of the switch,
+    // or final destination host, at each hop) for a packet from src node id
+    // to dst node id. RdmaHw lives in
+    // the ns-3 core library and has no visibility into the astra-sim ns3
+    // frontend's global routing tables (common.h's nextHop/nbr2if), so
+    // path lookup is injected from outside via this callback rather than
+    // called directly -- see astra-sim's common.h::BuildSourceRoute, which
+    // is what gets registered here. Called fresh for every packet (never
+    // cached on the QP), so packets of the same flow can be sprayed across
+    // different equal-cost paths.
+    typedef Callback<std::vector<uint16_t>, uint32_t, uint32_t> SourceRouteCallback;
+    SourceRouteCallback m_sourceRouteCb;
+    void SetSourceRouteCb(SourceRouteCallback cb)
+    {
+        m_sourceRouteCb = cb;
+    }
 
     // for monitor
     /** <port_id, tx_bytes> */

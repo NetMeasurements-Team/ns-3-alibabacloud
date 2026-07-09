@@ -23,6 +23,7 @@
 
 #include "ns3/header.h"
 #include "ns3/int-header.h"
+#include "ns3/sr-header.h"
 
 namespace ns3 {
 /**
@@ -132,6 +133,19 @@ public:
 		  uint8_t qIndex;
 	  } pfc;
   };
+
+  // Source Routing Header, present when the IPv4 protocol byte on the wire
+  // was SrHeader::PROTO_NUMBER. Not part of the union above: it precedes
+  // and coexists with whichever L4 protocol (udp/ack/...) actually follows,
+  // it doesn't replace it. When present, l3Prot is overwritten with the
+  // SRH's own nextHeader value, so all existing l3Prot-based branching
+  // elsewhere keeps working unmodified.
+  struct {
+	  bool present;
+	  uint8_t ptr;
+	  uint8_t numSegments;
+	  uint16_t segs[SrHeader::maxSegments];
+  } srh;
 
   uint8_t GetIpv4EcnBits (void) const;
   static uint32_t GetAckSerializedSize(void);

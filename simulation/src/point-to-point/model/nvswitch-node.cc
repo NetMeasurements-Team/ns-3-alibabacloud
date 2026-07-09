@@ -10,6 +10,7 @@
 #include "qbb-net-device.h"
 #include "ppp-header.h"
 #include "ns3/int-header.h"
+#include "ns3/sr-header.h"
 #include "ns3/simulator.h"
 #include <cmath>
 
@@ -25,6 +26,11 @@ TypeId NVSwitchNode::GetTypeId (void)
 			UintegerValue(0),
 			MakeUintegerAccessor(&NVSwitchNode::m_ackHighPrio),
 			MakeUintegerChecker<uint32_t>())
+	.AddAttribute("SourceRouting",
+			"Set to true to forward purely by the packet's Source Routing Header, bypassing ECMP",
+			BooleanValue(false),
+			MakeBooleanAccessor(&NVSwitchNode::m_sourceRouting),
+			MakeBooleanChecker())
   ;
   return tid;
 }
@@ -49,6 +55,15 @@ NVSwitchNode::NVSwitchNode(){
 }
 
 int NVSwitchNode::GetOutDev(Ptr<const Packet> p, CustomHeader &ch){
+	// Source routing bypasses the ECMP table entirely, see SwitchNode::GetOutDev.
+	// The SRH segment is a node id; resolve it to a local port via m_srNextHop.
+	if (m_sourceRouting && ch.srh.present){
+		auto it = m_srNextHop.find(ch.srh.segs[ch.srh.ptr]);
+		if (it == m_srNextHop.end())
+			return -1;
+		return it->second;
+	}
+
 	// look up entries
 	auto entry = m_rtTable.find(ch.dip);
 
@@ -81,6 +96,12 @@ void NVSwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch){
 	int idx = GetOutDev(p, ch);
 	if (idx >= 0){
 		NS_ASSERT_MSG(m_devices[idx]->IsLinkUp(), "The routing table look up should return link that is up");
+
+		// Advance the SRH pointer before forwarding, see SwitchNode::SendToDev.
+		if (m_sourceRouting && ch.srh.present){
+			uint8_t* buf = p->GetBuffer();
+			SrHeader::AdvancePtrInPlace(&buf[PppHeader::GetStaticSize() + 20]);
+		}
 
 		// determine the qIndex
 		uint32_t qIndex;
@@ -156,6 +177,10 @@ void NVSwitchNode::SetEcmpSeed(uint32_t seed){
 void NVSwitchNode::AddTableEntry(Ipv4Address &dstAddr, uint32_t intf_idx){
 	uint32_t dip = dstAddr.Get();
 	m_rtTable[dip].push_back(intf_idx);
+}
+
+void NVSwitchNode::AddSrNextHopEntry(uint32_t neighborNodeId, uint32_t intf_idx){
+	m_srNextHop[neighborNodeId] = intf_idx;
 }
 
 void NVSwitchNode::ClearTable(){

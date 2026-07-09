@@ -18,6 +18,7 @@ class SwitchNode : public Node{
 	uint32_t m_ecmpSeed;
 	Ptr<UniformRandomVariable> m_rand;
 	std::unordered_map<uint32_t, std::vector<int> > m_rtTable; // map from ip address (u32) to possible ECMP port (index of dev)
+	std::unordered_map<uint32_t, uint32_t> m_srNextHop; // map from neighbor node id to local egress port (index of dev), used for source routing
 	std::set<uint32_t> active_ports;	// record active ports in switch
 
 	// monitor of PFC
@@ -33,6 +34,7 @@ protected:
 	bool m_ecnEnabled;
     bool m_pfcEnabled;
     bool m_packetSpraying;
+    bool m_sourceRouting;
 	uint32_t m_ccMode;
 	uint64_t m_maxRtt;
 
@@ -52,6 +54,7 @@ public:
 	SwitchNode();
 	void SetEcmpSeed(uint32_t seed);
 	void AddTableEntry(Ipv4Address &dstAddr, uint32_t intf_idx);
+	void AddSrNextHopEntry(uint32_t neighborNodeId, uint32_t intf_idx);
 	void ClearTable();
 	bool SwitchReceiveFromDevice(Ptr<NetDevice> device, Ptr<Packet> packet, CustomHeader &ch);
 	void SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Packet> p);

@@ -16,6 +16,7 @@ class NVSwitchNode : public Node{
 	static const uint32_t qCnt = 8;	// Number of queues/priorities used
 	uint32_t m_ecmpSeed;
 	std::unordered_map<uint32_t, std::vector<int> > m_rtTable; // map from ip address (u32) to possible ECMP port (index of dev)
+	std::unordered_map<uint32_t, uint32_t> m_srNextHop; // map from neighbor node id to local egress port (index of dev), used for source routing
 
 	uint32_t m_bytes[pCnt][pCnt][qCnt]; // m_bytes[inDev][outDev][qidx] is the bytes from inDev enqueued for outDev at qidx
 	
@@ -27,6 +28,7 @@ class NVSwitchNode : public Node{
 
 protected:
 	uint32_t m_ackHighPrio; // set high priority for ACK/NACK
+	bool m_sourceRouting;
 
 private:
 	int GetOutDev(Ptr<const Packet>, CustomHeader &ch);
@@ -40,6 +42,7 @@ public:
 	NVSwitchNode();
 	void SetEcmpSeed(uint32_t seed);
 	void AddTableEntry(Ipv4Address &dstAddr, uint32_t intf_idx);
+	void AddSrNextHopEntry(uint32_t neighborNodeId, uint32_t intf_idx);
 	void ClearTable();
 	bool SwitchReceiveFromDevice(Ptr<NetDevice> device, Ptr<Packet> packet, CustomHeader &ch);
 	void SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Packet> p);

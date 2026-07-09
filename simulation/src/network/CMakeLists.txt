@@ -73,6 +73,7 @@ set(source_files
     utils/broadcom-egress-queue.cc
     utils/custom-header.cc
     utils/int-header.cc
+    utils/sr-header.cc
     utils/red-queue.cc
 )
 
@@ -155,6 +156,7 @@ set(header_files
     utils/broadcom-egress-queue.h
     utils/custom-header.h
     utils/int-header.h
+    utils/sr-header.h
     utils/red-queue.h
 )
 

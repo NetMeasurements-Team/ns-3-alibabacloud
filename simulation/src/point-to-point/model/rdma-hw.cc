@@ -9,6 +9,7 @@
 #include "ns3/double.h"
 #include "ns3/pointer.h"
 #include "ns3/ppp-header.h"
+#include "ns3/sr-header.h"
 #include "ns3/uinteger.h"
 #include <ns3/ipv4-header.h>
 #include <ns3/simple-seq-ts-header.h>
@@ -23,6 +24,16 @@ namespace ns3
 {
 NS_LOG_COMPONENT_DEFINE("RdmaHw");
 NS_OBJECT_ENSURE_REGISTERED(RdmaHw);
+
+// Same one-liner as astra-sim's common.h::ip_to_node_id. Duplicated rather
+// than shared because RdmaHw lives in the ns-3 core library, which cannot
+// depend on the astra-sim ns3 frontend that links against it; this needs
+// no shared state, just the IP address's own bit layout.
+static uint32_t
+IpToNodeId(uint32_t ip)
+{
+    return (ip >> 8) & 0xffff;
+}
 
 TypeId
 RdmaHw::GetTypeId(void)
@@ -117,6 +128,13 @@ RdmaHw::GetTypeId(void)
                           "Enable Rto timer (experimental)",
                           BooleanValue(false),
                           MakeBooleanAccessor(&RdmaHw::m_enable_rto),
+                          MakeBooleanChecker())
+            .AddAttribute("SourceRouting",
+                          "Tag outgoing data/ACK/NACK packets with a Source Routing "
+                          "Header built by the SourceRouteCallback, instead of "
+                          "relying on switch-side ECMP",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&RdmaHw::m_sourceRouting),
                           MakeBooleanChecker());
     return tid;
 }
@@ -585,10 +603,29 @@ RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader& ch)
             Create<Packet>(std::max(60 - 14 - 20 - (int)seqh.GetSerializedSize(), 0));
         newp->AddHeader(seqh);
 
+        uint8_t l4Proto = (x == 1 ? 0xFC : 0xFD); // ack=0xFC nack=0xFD
+        if (m_sourceRouting && !m_sourceRouteCb.IsNull())
+        {
+            // Reverse direction: this node (ch.dip) -> original sender (ch.sip).
+            // A fresh call per ACK/NACK, independent of the data packet it is
+            // acknowledging, so it may take a different equal-cost path.
+            std::vector<uint16_t> segs =
+                m_sourceRouteCb(IpToNodeId(ch.dip), IpToNodeId(ch.sip));
+            if (!segs.empty())
+            {
+                SrHeader srh;
+                srh.SetNextHeader(l4Proto);
+                srh.SetPtr(0);
+                srh.SetSegments(segs);
+                newp->AddHeader(srh);
+                l4Proto = SrHeader::PROTO_NUMBER;
+            }
+        }
+
         Ipv4Header head; // Prepare IPv4 header
         head.SetDestination(Ipv4Address(ch.sip));
         head.SetSource(Ipv4Address(ch.dip));
-        head.SetProtocol(x == 1 ? 0xFC : 0xFD); // ack=0xFC nack=0xFD
+        head.SetProtocol(l4Proto);
         head.SetTtl(64);
         head.SetPayloadSize(newp->GetSize());
         head.SetIdentification(rxQp->m_ipid++);
@@ -1067,11 +1104,30 @@ Ptr<Packet> RdmaHw::GenDataPacket(Ptr<RdmaQueuePair> qp, uint32_t pkt_size)
     udpHeader.SetDestinationPort(qp->dport);
     udpHeader.SetSourcePort(qp->sport);
     p->AddHeader(udpHeader);
+    // Source Routing Header, between the IP header and UDP, mirroring an
+    // IPv6 extension header. A fresh call per packet (never cached on the
+    // qp), so packets of the same flow can be sprayed across different
+    // equal-cost paths.
+    uint8_t l4Proto = 0x11;
+    if (m_sourceRouting && !m_sourceRouteCb.IsNull())
+    {
+        std::vector<uint16_t> segs =
+            m_sourceRouteCb(IpToNodeId(qp->sip.Get()), IpToNodeId(qp->dip.Get()));
+        if (!segs.empty())
+        {
+            SrHeader srh;
+            srh.SetNextHeader(l4Proto);
+            srh.SetPtr(0);
+            srh.SetSegments(segs);
+            p->AddHeader(srh);
+            l4Proto = SrHeader::PROTO_NUMBER;
+        }
+    }
     // add ipv4 header
     Ipv4Header ipHeader;
     ipHeader.SetSource(qp->sip);
     ipHeader.SetDestination(qp->dip);
-    ipHeader.SetProtocol(0x11);
+    ipHeader.SetProtocol(l4Proto);
     ipHeader.SetPayloadSize(p->GetSize());
     ipHeader.SetTtl(64);
     // nvls <-> ToS, ToS = 1 -> NVLS enable

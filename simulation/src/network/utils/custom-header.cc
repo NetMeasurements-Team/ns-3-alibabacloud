@@ -30,7 +30,7 @@ NS_LOG_COMPONENT_DEFINE ("CustomHeader");
 NS_OBJECT_ENSURE_REGISTERED (CustomHeader);
 
 CustomHeader::CustomHeader ()
-  : brief(1), headerType(L3_Header | L4_Header), 
+  : brief(1), headerType(L3_Header | L4_Header),
 	getInt(1),
 	// ppp header
 	pppProto (0),
@@ -45,9 +45,10 @@ CustomHeader::CustomHeader ()
     m_checksum (0),
     m_headerSize(5*4)
 {
+	srh.present = false;
 }
 CustomHeader::CustomHeader (uint32_t _headerType)
-  : brief(1), headerType(_headerType), 
+  : brief(1), headerType(_headerType),
 	getInt(1),
 	// ppp header
 	pppProto (0),
@@ -62,6 +63,7 @@ CustomHeader::CustomHeader (uint32_t _headerType)
     m_checksum (0),
     m_headerSize(5*4)
 {
+	srh.present = false;
 }
 
 TypeId 
@@ -90,6 +92,8 @@ uint32_t CustomHeader::GetSerializedSize (void) const{
 	if (headerType & L3_Header)
 		len += 5*4;
 	if (headerType & L4_Header){
+		if (srh.present)
+			len += SrHeader::GetStaticSize();
 		if (l3Prot == 0x6) // TCP
 			len += tcp.length * 4;
 		else if (l3Prot == 0x11) // UDP
@@ -131,10 +135,20 @@ void CustomHeader::Serialize (Buffer::Iterator start) const{
 	  uint8_t frag = fragmentOffset & 0xff;
 	  i.WriteU8 (frag);
 	  i.WriteU8 (m_ttl);
-	  i.WriteU8 (l3Prot);
+	  i.WriteU8 (srh.present ? SrHeader::PROTO_NUMBER : l3Prot);
 	  i.WriteHtonU16 (0);
 	  i.WriteHtonU32 (sip);
 	  i.WriteHtonU32 (dip);
+  }
+
+  // Source Routing Header, written between the IPv4 header and the real L4
+  // header when present (see Deserialize for the matching read side).
+  if ((headerType & L4_Header) && srh.present){
+	  i.WriteU8 (l3Prot);
+	  i.WriteU8 (srh.numSegments);
+	  i.WriteU8 (srh.ptr);
+	  for (uint32_t j = 0; j < SrHeader::maxSegments; j++)
+		  i.WriteU16 (srh.segs[j]);
   }
 
   // L4
@@ -248,12 +262,34 @@ CustomHeader::Deserialize (Buffer::Iterator start)
 	  }
   }
 
+  // Source Routing Header (SRH): sits between the IPv4 header and the real
+  // L4 header, mirroring an IPv6 extension header. When present, l3Prot is
+  // overwritten with the SRH's own nextHeader byte so every existing
+  // l3Prot branch below (and everywhere else that reads ch.l3Prot) keeps
+  // working unmodified; srh.present/srh.ptr/srh.segs are only consulted by
+  // the switch forwarding path.
+  int srhSize = 0;
+  if ((headerType & L4_Header) && l3Prot == SrHeader::PROTO_NUMBER){
+	  i = start;
+	  i.Next(l2Size + l3Size);
+	  uint8_t nextHeader = i.ReadU8();
+	  srh.numSegments = i.ReadU8();
+	  srh.ptr = i.ReadU8();
+	  for (uint32_t j = 0; j < SrHeader::maxSegments; j++)
+		  srh.segs[j] = i.ReadU16();
+	  srh.present = true;
+	  srhSize = SrHeader::GetStaticSize();
+	  l3Prot = nextHeader;
+  } else {
+	  srh.present = false;
+  }
+
   // TCP
   int l4Size = 0;
   if (headerType & L4_Header){
 	  if (l3Prot == 0x6){ // TCP
 		  i = start;
-		  i.Next(l2Size + l3Size);
+		  i.Next(l2Size + l3Size + srhSize);
 		  tcp.sport = i.ReadNtohU16 ();
 		  tcp.dport = i.ReadNtohU16 ();
 		  tcp.seq = i.ReadNtohU64 ();
@@ -279,7 +315,7 @@ CustomHeader::Deserialize (Buffer::Iterator start)
 		  l4Size = tcp.length * 4;
 	  }else if (l3Prot == 0x11){ // UDP + SeqTsHeader
 		  i = start;
-		  i.Next(l2Size + l3Size);
+		  i.Next(l2Size + l3Size + srhSize);
 		  // udp header
 		  udp.sport = i.ReadNtohU16 ();
 		  udp.dport = i.ReadNtohU16 ();
@@ -321,7 +357,7 @@ CustomHeader::Deserialize (Buffer::Iterator start)
 	  }
   }
 
-  return l2Size + l3Size + l4Size;
+  return l2Size + l3Size + srhSize + l4Size;
 }
 
 uint8_t CustomHeader::GetIpv4EcnBits (void) const{
