@@ -40,8 +40,6 @@ RdmaClientHelper::RdmaClientHelper(uint16_t pg,
                                    uint32_t win,
                                    uint64_t baseRtt,
                                    bool tolerate_ooo,
-                                   void (*msg_handler)(void* fun_arg),
-                                   void* fun_arg,
                                    int src,
                                    int dest,
                                    bool passiveDestroy)
@@ -60,8 +58,6 @@ RdmaClientHelper::RdmaClientHelper(uint16_t pg,
     SetAttribute("Dest", UintegerValue(dest));
     SetAttribute("NVLS_enable", UintegerValue(0));
     SetAttribute ("PassiveDestroy", BooleanValue (passiveDestroy));
-    this->msg_handler = msg_handler;
-    this->fun_arg = fun_arg;
 }
 
 void
@@ -78,7 +74,6 @@ RdmaClientHelper::Install(NodeContainer c)
     {
         Ptr<Node> node = *i;
         Ptr<RdmaClient> client = m_factory.Create<RdmaClient>();
-        client->SetFn(msg_handler, fun_arg);
         node->AddApplication(client);
         apps.Add(client);
     }

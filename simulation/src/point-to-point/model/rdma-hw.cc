@@ -929,13 +929,12 @@ RdmaHw::QpComplete(Ptr<RdmaQueuePair> qp)
     NS_ASSERT(!m_qpCompleteCallback.IsNull());
 
     uint32_t nic_idx = GetNicIdxOfQp(qp);
+    {
 #ifdef NS3_MTP
-    MtpInterface::ExplicitCriticalSection cs;
+        MtpInterface::CriticalSection cs;
 #endif
-    m_nic[nic_idx].dev->m_rdmaEQ->RemoveFinishedQps();
-#ifdef NS3_MTP
-    cs.ExitSection();
-#endif
+        m_nic[nic_idx].dev->m_rdmaEQ->RemoveFinishedQps();
+    }
 
     QpStopCC(qp);
 

@@ -57,8 +57,6 @@ class RdmaClientHelper
                      uint32_t win,
                      uint64_t baseRtt,
                      bool tolerate_ooo,
-                     void (*msg_handler)(void* fun_arg),
-                     void* fun_arg,
                      int src,
                      int dest,
                      bool passiveDestroy=true);
@@ -82,8 +80,6 @@ class RdmaClientHelper
 
   private:
     ObjectFactory m_factory;
-    void (*msg_handler)(void* fun_arg);
-    void* fun_arg;
 };
 
 } // namespace ns3

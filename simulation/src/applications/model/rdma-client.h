@@ -61,7 +61,6 @@ class RdmaClient : public Application
     void SetLocal(Ipv4Address ip, uint16_t port);
     void SetPG(uint16_t pg);
     void SetSize(uint64_t size);
-    void SetFn(void (*msg_handler)(void* fun_arg), void* fun_arg);
     /**
      * \brief callback invoked when a sent message has been fully acknowledged
      */

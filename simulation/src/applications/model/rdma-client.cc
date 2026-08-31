@@ -176,13 +176,6 @@ RdmaClient::Finish()
 }
 
 void
-RdmaClient::SetFn(void (*msg_handler)(void* fun_arg), void* fun_arg)
-{
-    this->msg_handler = msg_handler;
-    this->fun_arg = fun_arg;
-}
-
-void
 RdmaClient::DoDispose(void)
 {
     NS_LOG_FUNCTION_NOARGS();
