@@ -99,8 +99,6 @@ class RdmaClient : public Application
     uint16_t m_sport, m_dport;
     uint32_t m_win;     // bound of on-the-fly packets
     uint64_t m_baseRtt; // base Rtt
-    void (*msg_handler)(void* fun_arg);
-    void* fun_arg;
     uint64_t src;
     uint64_t dest;
     uint32_t nvls_enable;

@@ -11,36 +11,60 @@ using namespace ns3;
 using namespace std;
 
 int main(int argc, char** argv){
-	if (argc != 2 && argc != 3){
-		printf("Usage: ./trace_reader <trace_file> [filter_expr]\n");
-		return 0;
-	}
-	FILE* file = fopen(argv[1], "r");
-	TraceFilter f;
-	if (argc == 3){
-		f.parse(argv[2]);
-		if (f.root == NULL){
-			printf("Invalid filter\n");
-			return 0;
-		}
-	}
-	//printf("filter: %s\n", f.str().c_str());
+    if (argc < 2 || argc > 4){
+        printf("Usage: ./trace_reader <trace_file> [filter_expr] [output_file]\n");
+        return 0;
+    }
+    FILE* file = fopen(argv[1], "r");
+    TraceFilter f;
+    if (argc >= 3){
+        f.parse(argv[2]);
+        if (f.root == NULL){
+            printf("Invalid filter\n");
+            return 0;
+        }
+    }
 
-	// first read SimSetting
-	SimSetting sim_setting;
-	sim_setting.Deserialize(file);
-	#if 0
-	// print sim_setting
-	for (auto i : sim_setting.port_speed)
-		for (auto j : i.second)
-			printf("%u,%u:%lu\n", i.first, j.first, j.second);
-	#endif
+    FILE* out_file = NULL;
+    if (argc == 4){
+        out_file = fopen(argv[3], "w");
+        if (!out_file) {
+            printf("Failed to open output file\n");
+            return 1;
+        }
+    }
 
-	// read trace
-	TraceFormat tr;
-	while (tr.Deserialize(file) > 0){
-		if (!f.test(tr))
-			continue;
-		print_trace(tr);
-	}
+    // first read SimSetting
+    SimSetting sim_setting;
+    sim_setting.Deserialize(file);
+    if (out_file) {
+        sim_setting.Serialize(out_file);
+    }
+    
+    #if 0
+    // print sim_setting
+    for (auto i : sim_setting.port_speed)
+        for (auto j : i.second)
+            printf("%u,%u:%lu\n", i.first, j.first, j.second);
+    #endif
+
+    // read trace
+    TraceFormat tr;
+    while (tr.Deserialize(file) > 0){
+        if (!f.test(tr))
+            continue;
+        
+        if (out_file) {
+            tr.Serialize(out_file);
+        } else {
+            print_trace(tr);
+        }
+    }
+
+    fclose(file);
+    if (out_file) {
+        fclose(out_file);
+    }
+    
+    return 0;
 }
