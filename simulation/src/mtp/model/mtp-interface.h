@@ -9,6 +9,8 @@
 #include "ns3/simulator.h"
 
 #include <pthread.h>
+#include <mutex>
+#include <vector>
 
 namespace ns3
 {
@@ -196,7 +198,42 @@ class MtpInterface
                                 MakeEvent(f, std::forward<Ts>(args)...));
     }
 
+    /**
+     * @brief Queue a same-time public-LP event under a stable application ordering key.
+     *
+     * Events at a target time are held until every worker LP has advanced through that time,
+     * then sorted by absolute time and order key before receiving public-LP UIDs. Equal keys are
+     * equivalent and have no relative-order guarantee.
+     */
+    template <typename FUNC,
+              typename std::enable_if<!std::is_convertible<FUNC, Ptr<EventImpl>>::value, int>::type = 0,
+              typename std::enable_if<
+                  !std::is_function<typename std::remove_pointer<FUNC>::type>::value, int>::type = 0,
+              typename... Ts>
+    inline static void
+    ScheduleGlobalAtOrdered (const Time &time, uint64_t orderKey, FUNC f, Ts &&...args)
+    {
+      EnqueueOrderedGlobalEvent (time, orderKey, MakeEvent (f, std::forward<Ts> (args)...));
+    }
+
+    template <typename... Us, typename... Ts>
+    inline static void
+    ScheduleGlobalAtOrdered (const Time &time, uint64_t orderKey, void (*f) (Us...), Ts &&...args)
+    {
+      EnqueueOrderedGlobalEvent (time, orderKey, MakeEvent (f, std::forward<Ts> (args)...));
+    }
+
   private:
+    struct OrderedGlobalEvent
+    {
+      int64_t targetTs;
+      uint64_t orderKey;
+      EventImpl *event;
+    };
+
+    static void EnqueueOrderedGlobalEvent (const Time &time, uint64_t orderKey, EventImpl *event);
+    static void FlushOrderedGlobalEvents (const Time &throughTime);
+
     static void* ThreadFunc(void* arg);
 
     // determine logical process priority
@@ -227,6 +264,8 @@ class MtpInterface
 
     static pthread_key_t g_key;
     static std::atomic<bool> g_inCriticalSection;
+    static std::mutex g_orderedGlobalEventsMutex;
+    static std::vector<OrderedGlobalEvent> g_orderedGlobalEvents;
 };
 
 } // namespace ns3
