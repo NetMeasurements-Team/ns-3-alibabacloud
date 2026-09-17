@@ -1,6 +1,7 @@
 set(mpi_sources)
 set(mpi_headers)
 set(mpi_libraries)
+set(mtp_libraries)
 
 if(${ENABLE_MPI})
   set(mpi_sources
@@ -15,6 +16,12 @@ if(${ENABLE_MPI})
   )
 endif()
 
+if(${ENABLE_MTP})
+  set(mtp_libraries
+      ${libmtp}
+  )
+endif()
+
 build_lib(
   LIBNAME unified-bus
   SOURCE_FILES
@@ -25,6 +32,7 @@ build_lib(
 	model/protocol/ub-datalink.cc
 	model/ub-datatype.cc
 	model/protocol/ub-header.cc
+	model/protocol/ub-ctp.cc
 	model/ub-link.cc
 	model/ub-port.cc
 	model/ub-tag.cc
@@ -55,9 +63,11 @@ build_lib(
 	model/protocol/ub-datalink.h
 	model/ub-datatype.h
 	model/protocol/ub-header.h
+	model/protocol/ub-ctp.h
 	model/ub-link.h
 	model/ub-modulo-sequence.h
 	model/ub-port.h
+	model/ub-small-fifo-queue.h
 	model/ub-sliding-bitmap-window.h
 	model/ub-switch.h
 	model/protocol/ub-transaction.h
@@ -81,8 +91,10 @@ build_lib(
 	model/ub-fault.h
   LIBRARIES_TO_LINK ${libnetwork}
                     ${libinternet}
+                    ${libapplications}
                     ${libpoint-to-point}
                     ${libconfig-store}
+                    ${mtp_libraries}
                     ${mpi_libraries}
   TEST_SOURCES test/ub-test.cc
 )

@@ -36,6 +36,7 @@ namespace ns3 {
          * @return Pointer to created jetty
          */
         void CreateJetty(uint32_t src, uint32_t dest, uint32_t jettyNum);
+        void CreateJetty(uint32_t src, uint32_t jettyNum);
 
         void Init(uint32_t nodeId);
 
@@ -91,6 +92,8 @@ namespace ns3 {
         Ptr<UbWqeSegment> GetNextWqeSegment();
         bool ProcessWqeSegmentComplete(uint32_t taSsnFin);
         void RightShiftBitset(uint32_t shiftCount);
+        void SetTaSegmentBytes(uint32_t bytes);
+        uint32_t GetTaSegmentBytes() const;
 
         Ptr<UbWqeSegment> GenWqeSegment(Ptr<UbWqe> wqe, uint32_t segment_size);
 
@@ -126,6 +129,11 @@ namespace ns3 {
             return m_dest;
         }
 
+        bool HasBoundDest() const
+        {
+            return m_dest != UINT32_MAX;
+        }
+
         uint8_t GetSport() const
         {
             return m_sport;
@@ -138,7 +146,7 @@ namespace ns3 {
 
         bool IsLimited()
         {
-            return (m_taSsnSndNxt - m_taSsnSndUna) > m_inflightMax;
+            return (m_taSsnSndNxt - m_taSsnSndUna) >= m_inflightMax;
         }
 
         void SetSrc(uint32_t src)
@@ -150,6 +158,13 @@ namespace ns3 {
         {
             m_dest = dest;
         }
+
+        void ClearDest()
+        {
+            m_dest = UINT32_MAX;
+        }
+
+        bool CanAcceptWqe(Ptr<UbWqe> wqe) const;
 
         void SetSport(uint8_t sport)
         {
@@ -168,6 +183,7 @@ namespace ns3 {
         }
 
         void SetClientCallback(Callback<void, uint32_t, uint32_t> cb);
+        void SetCompletionObserver(Callback<void, uint32_t, uint32_t> cb);
         Callback<void, uint32_t, uint32_t> FinishCallback;
 
         void SetNodeId(uint32_t nodeId) {m_nodeId = nodeId; }
@@ -186,6 +202,11 @@ namespace ns3 {
             return m_taSsnSndUna;
         }
 
+        uint32_t GetTaSsnSndNxtForTest() const
+        {
+            return m_taSsnSndNxt;
+        }
+
     private:
         Ptr<UbTransaction> GetTransaction();
         void DoDispose() override;
@@ -196,10 +217,11 @@ namespace ns3 {
         // ========== 传输参数 ==========
         uint32_t m_nodeId;
         uint32_t m_src;  // 源节点标识符
-        uint32_t m_dest; // 目的节点标识符
+        uint32_t m_dest{UINT32_MAX}; // 目的节点标识符；UINT32_MAX 表示 unbound Jetty
         uint8_t m_sport;
         uint8_t m_dport;
-        uint32_t m_inflightMax = 10000;
+        uint32_t m_inflightMax = 512;
+        uint32_t m_taSegmentBytes = UB_WQE_TA_SEGMENT_BYTE;
 
         // ========== Jetty队列信息 ==========
         // 当前只在WQE推入jetty中才会更新
@@ -212,6 +234,7 @@ namespace ns3 {
         uint32_t m_taSsnSndNxt = 0;                                 // TA层下一个待发送的分段序号
         uint32_t m_taSsnSndUna = 0;                                 // TA层未确认的最小分段序号
         UbSlidingBitmapWindow m_ssnAckWindow{UB_JETTY_TASSN_OOO_THRESHOLD}; // 接收维护的bitmap
+        Callback<void, uint32_t, uint32_t> m_completionObserver;
         // 每个jetty统一编号，单调升，作为WqeSegment的编号统计
         //   |----ssn5----|------ssn4-------|------ssn3----->
         //   |----ssn2----|----ssn1---|---startssn0----->

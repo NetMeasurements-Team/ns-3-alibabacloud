@@ -4,8 +4,9 @@
 
 #include "ns3/node.h"
 #include <map>
-#include <set>
 #include <memory>
+#include <set>
+#include <unordered_map>
 namespace ns3 {
 
 class UbQueueManager;
@@ -23,6 +24,7 @@ struct RoutingKey {
     uint8_t priority;    // 优先级
     bool useShortestPath;
     bool usePacketSpray;
+    bool hashIncludesTransportPorts{false};
 };
 
 /**

@@ -57,6 +57,8 @@ namespace ns3 {
 
         bool ProcessWqeSegmentComplete(Ptr<UbWqeSegment> wqeSegment);
         void HandleInboundTaUnit(uint32_t localTpn, Ptr<UbWqeSegment> segment);
+        Ptr<UbWqeSegment> ProcessInboundTaRequest(Ptr<UbWqeSegment> request);
+        bool ProcessInboundTaResponse(Ptr<UbWqeSegment> response);
         uint64_t DeriveRemoteAddressForTest(const Ptr<UbWqeSegment>& request) const
         {
             return DeriveRemoteAddress(request);
@@ -116,6 +118,10 @@ namespace ns3 {
         std::map<uint32_t, Ptr<UbTransportChannel>> m_tpnMap;
         // Jetty和TP的绑定关系
         std::map<uint32_t, std::vector<Ptr<UbTransportChannel>>> m_jettyTpGroup;
+        // 每个 Jetty 下次从哪个 TP 开始调度，避免短 WQE 总被第一个 TP 抢占。
+        std::map<uint32_t, uint32_t> m_jettyTpNextIndex;
+        // 新 Jetty 的初始 TP 轮转位置；一任务一 Jetty 的短流也能展开到多 TP。
+        uint32_t m_nextJettyTpStartIndex = 0;
         // Tp与jetty的绑定关系
         std::map<uint32_t, std::vector<Ptr<UbJetty>>> m_tpRelatedJetties;
         //  TP收到的各个remote解析后存储的segment

@@ -2,6 +2,7 @@
 #ifndef UB_UBSWITCH_ALLOCATOR_H
 #define UB_UBSWITCH_ALLOCATOR_H
 
+#include <optional>
 #include <vector>
 #include <unordered_map>
 #include "ns3/object.h"
@@ -39,12 +40,25 @@ public:
     void CheckDeadlock();
 
 protected:
+    struct IngressCandidate
+    {
+        Ptr<UbIngressQueue> queue;
+        uint32_t ingressQueueSlot;
+    };
+
+    uint32_t GetIngressQueueSlotCount(uint32_t outPort, uint32_t priority) const;
+    std::optional<IngressCandidate> FindNextEligibleIngressQueue(uint32_t outPort,
+                                                                 uint32_t priority,
+                                                                 uint32_t startIngressQueueSlot,
+                                                                 Ptr<UbPort> egressPort) const;
+
     Time m_allocationTime;
     uint32_t m_nodeId;
     IngressSource_t m_ingressSources;
     EgressStatus_t m_egressStatus;
     std::vector<bool> m_isRunning;	
     std::vector<bool> m_oneMoreRound;
+    uint32_t m_voqIngressSlotCount = 0;
 };
 
 
@@ -96,8 +110,8 @@ private:
     std::vector<std::vector<uint32_t> > m_deficit;
     std::vector<uint32_t> m_currVlIdx;
 
-    // 记录最近一次在某个 VLAN 下选中的 ingressQueue 索引，用于额度不足时回滚 m_rrIdx
-    std::vector<std::vector<uint32_t> > m_lastSelectedQIdx;
+    // 记录最近一次在某个 VLAN 下选中的 ingress queue slot，用于额度不足时回滚 m_rrIdx
+    std::vector<std::vector<uint32_t> > m_lastSelectedIngressQueueSlot;
 
     uint32_t    m_defaultQuantum;
     std::string m_vlQuantumsStr;

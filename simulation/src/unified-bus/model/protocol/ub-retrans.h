@@ -28,6 +28,7 @@ struct UbRetransAckResult
     uint64_t previousSndUna{0};
     uint64_t newSndUna{0};
     bool triggerTransmit{false};
+    uint32_t retransmitBytes{0};
 };
 
 struct UbRetransReceiveDecision

@@ -129,9 +129,7 @@ enum class TpOpcode : uint8_t {
     TP_OPCODE_RELIABLE_TA = 0x1,        // 可靠TA数据包（典型数据包）
     TP_OPCODE_ACK_WITHOUT_CETPH = 0x2,  // 不带CETPH的TP ACK（典型ACK）
     TP_OPCODE_ACK_WITH_CETPH = 0x3,     // 带CETPH的TP ACK
-    // TODO(retrans): 按 UB Base Spec 2.0 对齐 TPNAK 的报文字段编码。
-    // 规范中 0x4 为 Reserved，普通 TPNAK 应表示为 TPOpcode=0x2 且 RSPST=3'b011。
-    TP_OPCODE_NAK_WITHOUT_CETPH = 0x4,  // 不带CETPH的TP NAK
+    TP_OPCODE_RESERVED1 = 0x4,          // 保留
     TP_OPCODE_SACK_WITHOUT_CETPH = 0x5, // 不带CETPH的TP SACK
     TP_OPCODE_SACK_WITH_CETPH = 0x6,    // 带CETPH的TP SACK
     TP_OPCODE_RESERVED2 = 0x7,          // 保留
@@ -147,6 +145,24 @@ enum UbRetransTimeoutMode : uint8_t {
     STATIC = 0,
     DYNAMIC = 1,
 };
+
+enum TransportMode : uint8_t {
+    RTP = 0,
+    CTP = 1,
+};
+
+enum class CtpOpcode : uint8_t {
+    CTP_DATA = 0x0,
+    CTP_CNP = 0x1,
+};
+
+constexpr uint8_t UB_CNA_NLP_CTPH = 0x0;
+constexpr uint8_t UB_CNA_NLP_RTPH = 0x2;
+constexpr uint8_t UB_CTPH_NLP_COMPACT_TAH = 0x0;
+constexpr uint8_t UB_CTPH_NLP_UPI32_EID128_TAH = 0x1;
+constexpr uint8_t UB_CTPH_NLP_UPI16_EID40_TAH = 0x2;
+constexpr uint32_t UB_COMPACT_EID_MAX = 0xFFFFF;
+constexpr uint16_t UB_COMPACT_UPI_MAX = 0x7FFF;
 
 // 定义NLP常量，便于使用
 enum NextLayerProtocol : uint8_t {
@@ -469,6 +485,26 @@ public:
         return m_dest;
     }
 
+    bool HasSrcEntityId() const
+    {
+        return m_hasSrcEntityId;
+    }
+
+    bool HasDstEntityId() const
+    {
+        return m_hasDstEntityId;
+    }
+
+    uint32_t GetSrcEntityId() const
+    {
+        return m_srcEntityId;
+    }
+
+    uint32_t GetDstEntityId() const
+    {
+        return m_dstEntityId;
+    }
+
     uint8_t GetSport() const
     {
         return m_sport;
@@ -502,6 +538,18 @@ public:
     void SetDest(uint32_t dest)
     {
         m_dest = dest;
+    }
+
+    void SetSrcEntityId(uint32_t srcEntityId)
+    {
+        m_srcEntityId = srcEntityId;
+        m_hasSrcEntityId = true;
+    }
+
+    void SetDstEntityId(uint32_t dstEntityId)
+    {
+        m_dstEntityId = dstEntityId;
+        m_hasDstEntityId = true;
     }
 
     void SetSport(uint8_t sport)
@@ -755,6 +803,16 @@ public:
         return m_resLenBytes;
     }
 
+    void SetLogicalBytes(uint32_t logicalBytes)
+    {
+        SetResLenBytes(logicalBytes);
+    }
+
+    uint32_t GetLogicalBytes() const
+    {
+        return GetResLenBytes();
+    }
+
     void SetPayloadBytes(uint32_t payloadBytes)
     {
         m_payloadBytes = payloadBytes;
@@ -780,6 +838,10 @@ private:
     // ========== 任务描述信息 ==========
     uint32_t m_src;     // 源节点标识符
     uint32_t m_dest;    // 目的节点标识符
+    bool m_hasSrcEntityId{false};
+    bool m_hasDstEntityId{false};
+    uint32_t m_srcEntityId{0};
+    uint32_t m_dstEntityId{0};
     uint8_t m_sport;    // 源端口号
     uint8_t m_dport;    //< 目的端口号
     TaOpcode m_type = TaOpcode::TA_OPCODE_WRITE;           // 操作类型 (READ/WRITE)
@@ -864,6 +926,26 @@ public:
         return m_dest;
     }
 
+    bool HasSrcEntityId() const
+    {
+        return m_hasSrcEntityId;
+    }
+
+    bool HasDstEntityId() const
+    {
+        return m_hasDstEntityId;
+    }
+
+    uint32_t GetSrcEntityId() const
+    {
+        return m_srcEntityId;
+    }
+
+    uint32_t GetDstEntityId() const
+    {
+        return m_dstEntityId;
+    }
+
     uint8_t GetSport() const
     {
         return m_sport;
@@ -907,6 +989,18 @@ public:
     void SetDest(uint32_t dest)
     {
         m_dest = dest;
+    }
+
+    void SetSrcEntityId(uint32_t srcEntityId)
+    {
+        m_srcEntityId = srcEntityId;
+        m_hasSrcEntityId = true;
+    }
+
+    void SetDstEntityId(uint32_t dstEntityId)
+    {
+        m_dstEntityId = dstEntityId;
+        m_hasDstEntityId = true;
     }
 
     void SetSport(uint8_t sport)
@@ -1201,6 +1295,16 @@ public:
         return m_resLenBytes;
     }
 
+    void SetLogicalBytes(uint32_t logicalBytes)
+    {
+        SetResLenBytes(logicalBytes);
+    }
+
+    uint32_t GetLogicalBytes() const
+    {
+        return GetResLenBytes();
+    }
+
     void SetPayloadBytes(uint32_t payloadBytes)
     {
         m_payloadBytes = payloadBytes;
@@ -1226,6 +1330,10 @@ private:
     // ========== 任务描述信息 ==========
     uint32_t m_src{0};                              // 源节点标识符
     uint32_t m_dest{0};                             // 目的节点标识符
+    bool m_hasSrcEntityId{false};
+    bool m_hasDstEntityId{false};
+    uint32_t m_srcEntityId{0};
+    uint32_t m_dstEntityId{0};
     uint8_t m_sport{0};                             // 源端口号
     uint8_t m_dport{0};                             // 目的端口号
     TaOpcode m_type{TaOpcode::TA_OPCODE_WRITE};     // 操作类型 (READ/WRITE)

@@ -5,6 +5,7 @@
 #include <iostream>
 #include <sstream>
 #include <chrono>
+#include <functional>
 #include <map>
 #include <fstream>
 #include <mutex>
@@ -15,6 +16,7 @@
 #include "ns3/ub-transaction.h"
 #include "ns3/ub-controller.h"
 #include "ns3/ub-transport.h"
+#include "ns3/ub-ctp.h"
 #include "ns3/ub-link.h"
 #include "ns3/ub-port.h"
 #include "ns3/ptr.h"
@@ -33,6 +35,8 @@
 #include "ns3/random-variable-stream.h"
 #include "ns3/enum.h"
 #include "ns3/ub-fault.h"
+
+class UbLinkDelayOffsetTest;
 
 namespace utils {
 class UbTraceFileConcurrencyTest;
@@ -68,7 +72,39 @@ public:
     // Loads traffic records and initializes phase-dependency state in UbTrafficGen.
     std::vector<TrafficRecord> LoadTrafficConfig(const std::string &filename);
 
-    void CreateTopo(const std::string &filename);
+    struct TrafficLoadStats
+    {
+        uint64_t recordCount{0};
+        uint32_t maxTaskId{0};
+    };
+
+    // Streams traffic records without retaining a full vector in memory.
+    void ForEachTrafficRecord(const std::string& filename,
+                              const std::function<void(const TrafficRecord&)>& callback);
+
+    // Callback-only row view; string_view fields must not be stored after callback return.
+    void ForEachTrafficRecordView(const std::string& filename,
+                                  const std::function<void(const TrafficRecordView&)>& callback);
+
+    // Pre-registers phase membership before streaming AddTask calls.
+    void RegisterTrafficPhaseDependencies(const std::string& filename);
+
+    TrafficLoadStats RegisterTrafficPhaseDependenciesAndGetStats(const std::string& filename);
+
+    struct LinkDelayOffsetStats
+    {
+        uint64_t positiveLinkCount{0};
+        uint64_t zeroDelayLinkCount{0};
+        uint64_t distinctOffsetCount{0};
+        uint64_t offsetReuseCount{0};
+        uint64_t maxLinksPerOffset{0};
+    };
+
+    void CreateTopo(const std::string& filename);
+
+    LinkDelayOffsetStats CreateTopo(const std::string& filename,
+                                    ns3::Time offsetWindow,
+                                    uint32_t offsetSeed);
 
     void AddRoutingTable(const std::string &filename);
 
@@ -208,6 +244,15 @@ public:
 private:
     friend class ::utils::UbTraceFileConcurrencyTest;
     friend class ::utils::UbQueueSamplerEventRetentionTest;
+    friend class ::UbLinkDelayOffsetTest;
+
+    static ns3::Time ResolveLinkDelayWithOffset(ns3::Time baseDelay,
+                                                ns3::Time offsetWindow,
+                                                uint32_t offsetSeed,
+                                                uint32_t node1,
+                                                uint32_t port1,
+                                                uint32_t node2,
+                                                uint32_t port2);
 
     struct TraceFileState
     {
@@ -253,6 +298,8 @@ private:
         std::string portNumStr;
 
         std::string forwardDelay;
+
+        std::string allocationDelay;
 
         std::string systemIdStr;
     };
@@ -362,6 +409,18 @@ private:
 
     void SetRecord(int fieldCount, std::string field, TrafficRecord &record);
 
+    void ForEachTrafficRecordInternal(const std::string& filename,
+                                      const std::string& action,
+                                      const std::function<void(const TrafficRecord&)>& callback);
+
+    void ForEachTrafficRecordViewInternal(
+        const std::string& filename,
+        const std::string& action,
+        const std::function<void(const TrafficRecordView&)>& callback);
+
+    void ForEachTrafficPhaseIndexRecord(const std::string& filename,
+                                        const std::function<void(uint32_t, uint32_t)>& callback);
+
     static void PrintTraceInfo(const std::string& fileName, const std::string& info);
 
     static void PrintTraceInfoNoTs(const std::string& fileName, const std::string& info);
@@ -389,10 +448,11 @@ private:
 
     static void TpWqeSegmentCompletesNotify(uint32_t nodeId, uint32_t taskId, uint32_t taSsn);
 
-    // static void TpRecvNotify(uint32_t packetUid, uint32_t psn, uint32_t src, uint32_t dst, uint32_t srcTpn,
-    //                          uint32_t dstTpn, ns3::PacketType type, uint32_t size, uint32_t taskId,
-    //                          std::string ackInfo, ns3::UbPacketTraceTag traceTag);
     static void TpRecvNotify(UbTpRecvTraceData data);
+
+    static void CtpFirstPacketSendsNotify(UbCtpPacketTimingTraceData data);
+
+    static void CtpLastPacketACKsNotify(UbCtpPacketTimingTraceData data);
 
     static void LdstRecvNotify(uint32_t packetUid,
                                uint32_t src,
@@ -417,6 +477,11 @@ private:
     static void PortRxNotify(uint32_t nodeId, uint32_t portId, uint32_t size);
 
     static void QueueVoqNotify(uint32_t nodeId, uint32_t portId, uint64_t voqBytes);
+
+    static void QueueIngressOccupancyNotify(uint32_t nodeId,
+                                            uint32_t inPort,
+                                            uint32_t priority,
+                                            uint64_t bytes);
 
     static void QueueEgressEnqueueNotify(uint32_t nodeId,
                                          uint32_t portId,

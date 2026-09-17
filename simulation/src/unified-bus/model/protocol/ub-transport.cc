@@ -31,6 +31,8 @@ using UbTpPsnSequence = UbModuloSequence<24, uint64_t>;
 using UbTpMsnSequence = UbModuloSequence<24, uint64_t>;
 using UbTaSsnSequence = UbModuloSequence<16, uint32_t>;
 
+constexpr uint32_t kShallowPipelineActiveSendDepth = 2;
+
 bool
 IsZeroPayloadReadRequest(const Ptr<UbWqeSegment>& segment)
 {
@@ -335,7 +337,6 @@ UbTransportChannel::IsTransportResponseOpcode(uint8_t opcode)
 {
     return opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_ACK_WITHOUT_CETPH) ||
            opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_ACK_WITH_CETPH) ||
-           opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_NAK_WITHOUT_CETPH) ||
            opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_SACK_WITHOUT_CETPH) ||
            opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_SACK_WITH_CETPH) ||
            opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_CNP);
@@ -706,8 +707,7 @@ UbTransportChannel::NotifyNewDataPacketSent(const NewDataSendContext& ctx,
               << " Src: " << m_src
               << " Dst: " << m_dest
               << " PacketSize: " << packet->GetSize()
-              << " TaskId: " << ctx.segment->GetTaskId()
-              << " Priority: " << m_priority);
+              << " TaskId: " << ctx.segment->GetTaskId());
 }
 
 void
@@ -732,8 +732,8 @@ UbTransportChannel::AdvanceNewDataSendState(const NewDataSendContext& ctx,
         m_retrans->StartTimerIfNeeded();
     }
 
-    // Shallow pipeline keeps at most two active segments capable of sending new data.
-    if (ctx.segment->IsSentCompleted() && GetActiveSendSegmentCount() < 2) {
+    // Shallow pipeline keeps a small active and unacked segment budget.
+    if (ctx.segment->IsSentCompleted() && CanScheduleAnotherSegment()) {
         ApplyNextWqeSegment();
     }
     if (HasPendingTransmitWork()) {
@@ -938,14 +938,9 @@ Ptr<Packet> UbTransportChannel::GenDataPacket(Ptr<UbWqeSegment> wqeSegment,
     TpHeader.SetPsn(UbTpPsnSequence::ToWire(m_psnSndNxt));
     TpHeader.SetTpMsn(UbTpMsnSequence::ToWire(wqeSegment->GetTpMsn()));
     p->AddHeader(TpHeader);
-    // add udp header
-    if (m_usePacketSpray) {
-        if (m_lbHashSalt == UINT16_MAX) {
-            m_lbHashSalt = 0;
-        } else {
-            m_lbHashSalt++;
-        }
-    }
+    // Packet-spray hashing must be derived from packet identity, not from the order in which
+    // worker threads happen to call this function.
+    m_lbHashSalt = m_usePacketSpray ? UbTpPsnSequence::ToWire(m_psnSndNxt) : 0;
     UbPort::AddUdpHeader(p, this);
     // add ipv4 header
     UbPort::AddIpv4Header(p, this);
@@ -1191,7 +1186,9 @@ UbTransportChannel::ParseTransportResponsePacket(Ptr<Packet> packet,
                    ctx.opcode == TpOpcode::TP_OPCODE_SACK_WITH_CETPH;
     ctx.hasSaetph = ctx.opcode == TpOpcode::TP_OPCODE_SACK_WITHOUT_CETPH ||
                     ctx.opcode == TpOpcode::TP_OPCODE_SACK_WITH_CETPH;
-    ctx.isTpnak = ctx.opcode == TpOpcode::TP_OPCODE_NAK_WITHOUT_CETPH;
+    ctx.isTpnak = (ctx.opcode == TpOpcode::TP_OPCODE_ACK_WITHOUT_CETPH ||
+                   ctx.opcode == TpOpcode::TP_OPCODE_ACK_WITH_CETPH) &&
+                  ctx.transportHeader.GetRspSt() == 3;
 
     if (ctx.isCnp) {
         packet->RemoveHeader(ctx.cnpHeader);
@@ -1266,10 +1263,27 @@ UbTransportChannel::HandleReceivedTpNak(const TransportResponseContext& ctx)
     }
 
     if (!IsRetransEnabled()) {
+        if (ctx.hasCetph) {
+            m_congestionCtrl->OnSenderCongestionNotification(TpOpcode::TP_OPCODE_ACK_WITH_CETPH,
+                                                             UbTpPsnSequence::ToWire(nakPsn),
+                                                             ctx.congestionHeader);
+        }
         return true;
     }
 
     const UbRetransAckResult ackResult = m_retrans->OnTransportNak(ctx.transportHeader);
+    if (ctx.hasCetph) {
+        if (ackResult.triggerTransmit) {
+            m_congestionCtrl->OnSenderCongestionNotification(TpOpcode::TP_OPCODE_ACK_WITH_CETPH,
+                                                             UbTpPsnSequence::ToWire(nakPsn),
+                                                             ctx.congestionHeader,
+                                                             ackResult.retransmitBytes);
+        } else {
+            m_congestionCtrl->OnSenderCongestionNotification(TpOpcode::TP_OPCODE_ACK_WITH_CETPH,
+                                                             UbTpPsnSequence::ToWire(nakPsn),
+                                                             ctx.congestionHeader);
+        }
+    }
     if (ackResult.triggerTransmit) {
         TriggerTransportTransmit();
     }
@@ -1395,8 +1409,7 @@ UbTransportChannel::CompleteAckedWqeSegments(const TransportResponseContext& ctx
         }
 
         m_wqeSegmentVector.erase(m_wqeSegmentVector.begin() + i);
-        // Shallow pipeline counts only active segments that can still send new data.
-        if (GetActiveSendSegmentCount() < 2) {
+        if (CanScheduleAnotherSegment()) {
             ApplyNextWqeSegment();
         }
     }
@@ -1576,8 +1589,7 @@ UbTransportChannel::TraceReceivedDataPacket(const ReceivedDataPacketContext& ctx
                   << " PacketType: Packet"
                   << " Src: " << m_src
                   << " Dst: " << m_dest
-                  << " PacketSize: " << ctx.packet->GetSize()
-                  << " Priority: " << m_priority);
+                  << " PacketSize: " << ctx.packet->GetSize());
     if (m_pktTraceEnabled) {
         UbPacketTraceTag traceTag;
         UbFlowTag flowTag = ctx.flowTag;
@@ -1601,7 +1613,7 @@ UbTransportChannel::BuildTransportResponsePacket(const ReceivedDataPacketContext
 
     UbTransportHeader tpHeader = ctx.transportHeader;
     tpHeader.SetTPOpcode(response.opcode);
-    tpHeader.SetRspSt(0);
+    tpHeader.SetRspSt(response.rspSt);
     tpHeader.SetRspInfo(0);
     tpHeader.SetPsn(UbTpPsnSequence::ToWire(response.psn));
     tpHeader.SetSrcTpn(m_tpn);
@@ -1656,8 +1668,7 @@ UbTransportChannel::EnqueueTransportResponse(Ptr<Packet> response,
                   << " PacketType: " << packetType
                   << " Src: " << m_src
                   << " Dst: " << m_dest
-                  << " PacketSize: " << response->GetSize()
-                  << " Priority: " << m_priority);
+                  << " PacketSize: " << response->GetSize());
     TriggerTransportTransmit();
 }
 
@@ -1677,7 +1688,12 @@ UbTransportChannel::HandleImmediateRetransReceiveDecision(
 
     AckResponseContext response;
     response.opcode = decision.responseOpcode;
+    response.rspSt = 3;
     response.psn = decision.responsePsn;
+    if (response.opcode == TpOpcode::TP_OPCODE_ACK_WITH_CETPH) {
+        response.congestionHeader =
+            m_congestionCtrl->OnReceiverPrepareAckCongestionHeader(0, 0);
+    }
     Ptr<Packet> responsePacket = BuildTransportResponsePacket(ctx, response);
     EnqueueTransportResponse(responsePacket, "tpnak", response.psn);
     return true;
@@ -1905,6 +1921,31 @@ void UbTransportChannel::RecvDataPacket(Ptr<Packet> p)
     CompleteInboundTaUnits(completedTaUnits);
 }
 
+uint32_t
+UbTransportChannel::GetGbnRetransmissionProgressBytesFromPsn(uint64_t psn) const
+{
+    uint64_t retransmitBytes = 0;
+    for (const Ptr<UbWqeSegment>& segment : m_wqeSegmentVector) {
+        if (segment == nullptr) {
+            continue;
+        }
+        const uint64_t segmentStart = segment->GetPsnStart();
+        const uint64_t segmentEnd = segmentStart + segment->GetPsnSize();
+        const uint64_t overlapStart = std::max(psn, segmentStart);
+        const uint64_t overlapEnd = std::min(m_psnSndNxt, segmentEnd);
+        if (overlapStart >= overlapEnd) {
+            continue;
+        }
+        const uint64_t segmentBytes = GetTotalProgressBytes(segment);
+        const uint64_t startOffset =
+            std::min(segmentBytes, (overlapStart - segmentStart) * UB_MTU_BYTE);
+        const uint64_t endOffset =
+            std::min(segmentBytes, (overlapEnd - segmentStart) * UB_MTU_BYTE);
+        retransmitBytes += endOffset - startOffset;
+    }
+    return static_cast<uint32_t>(std::min<uint64_t>(retransmitBytes, UINT32_MAX));
+}
+
 void
 UbTransportChannel::ResetSegmentSendProgressFromPsn(uint64_t psn)
 {
@@ -1952,6 +1993,22 @@ uint32_t UbTransportChannel::GetActiveSendSegmentCount() const
         }
     }
     return activeCount;
+}
+
+uint32_t UbTransportChannel::GetOutstandingUnackedSegmentCount() const
+{
+    uint32_t outstandingCount = 0;
+    for (const Ptr<UbWqeSegment>& segment : m_wqeSegmentVector) {
+        if (segment != nullptr) {
+            ++outstandingCount;
+        }
+    }
+    return outstandingCount;
+}
+
+bool UbTransportChannel::CanScheduleAnotherSegment() const
+{
+    return GetActiveSendSegmentCount() < kShallowPipelineActiveSendDepth;
 }
 
 bool
@@ -2112,19 +2169,10 @@ void UbTransportChannel::WqeSegmentCompletesNotify(uint32_t nodeId, uint32_t tas
     m_traceWqeSegmentCompletesNotify(nodeId, taskId, taSsn);
 }
 
-// void UbTransportChannel::TpRecvNotify(uint32_t packetUid, uint32_t psn, uint32_t src, uint32_t dst,
-//                                       uint32_t srcTpn, uint32_t dstTpn, PacketType type,
-//                                       uint32_t size, uint32_t taskId, std::string ackInfo,
-//                                       UbPacketTraceTag traceTag)
-// {
-//     m_tpRecvNotify(packetUid, psn, src, dst, srcTpn, dstTpn, type, size, taskId, ackInfo, traceTag);
-// }
-
 void UbTransportChannel::TpRecvNotify(UbTpRecvTraceData data)
 {
     m_tpRecvNotify(data);
 }
-
 
 // ==========================================================================
 // UbTransportGroup Implementation

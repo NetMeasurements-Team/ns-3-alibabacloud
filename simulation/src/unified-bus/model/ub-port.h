@@ -21,6 +21,7 @@
 #include "ns3/ub-controller.h"
 #include "ns3/ub-switch.h"
 #include "ns3/ub-flow-control.h"
+#include "ns3/ub-small-fifo-queue.h"
 
 #define TIME_TO_LIVE   64
 
@@ -46,7 +47,7 @@ using PacketEntry = std::tuple<uint32_t, uint32_t, Ptr<Packet>>;
  */
 class UbEgressQueue : public Object {
 public:
-    std::queue<PacketEntry> m_egressQ; // 通过算法分配到的包, inPortId, priority, packet
+    UbSmallFifoQueue<PacketEntry, 4> m_egressQ; // 通过算法分配到的包, inPortId, priority, packet
 
     uint64_t m_maxEgressBytes;     // Max bytes accepted by egress queue
     uint64_t m_currentBytes = 0;   // Current bytes in egress queue (用于拥塞控制等)
@@ -62,7 +63,7 @@ public:
     void AddPacketHeader(Ptr<UbTransportChannel> tp, Ptr<Packet> p, bool credit, bool ack);
 
     bool IsEmpty();
-    
+
     /**
      * @brief 获取EgressQueue当前字节占用（用于拥塞控制等）
      */

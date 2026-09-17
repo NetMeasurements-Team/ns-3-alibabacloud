@@ -49,11 +49,25 @@ void UbFunction::CreateJetty(uint32_t src, uint32_t dest, uint32_t jettyNum)
     // 创建新的Jetty
     Ptr<UbJetty> jetty = CreateObject<UbJetty>();
     jetty->Init();
+    jetty->SetNodeId(m_nodeId);
     jetty->SetJettyNum(jettyNum);
     jetty->SetSrc(src);
     jetty->SetDest(dest);
     m_numToJetty[jettyNum] = jetty;
     NS_LOG_DEBUG("Created jetty success");
+}
+
+void UbFunction::CreateJetty(uint32_t src, uint32_t jettyNum)
+{
+    NS_LOG_DEBUG(this << src << jettyNum);
+    Ptr<UbJetty> jetty = CreateObject<UbJetty>();
+    jetty->Init();
+    jetty->SetNodeId(m_nodeId);
+    jetty->SetJettyNum(jettyNum);
+    jetty->SetSrc(src);
+    jetty->ClearDest();
+    m_numToJetty[jettyNum] = jetty;
+    NS_LOG_DEBUG("Created unbound jetty success");
 }
 
 bool UbFunction::IsJettyExists(uint32_t jettyNum)
@@ -174,10 +188,15 @@ TypeId UbJetty::GetTypeId(void)
                                       UintegerValue(2048),
                                       MakeUintegerAccessor(&UbJetty::m_oooAckThreshold),
                                       MakeUintegerChecker<uint32_t>())
-                        .AddAttribute("UbInflightMax",
+                        .AddAttribute("UbJettyInflightMax",
                                       "Maximum number of in-flight WQE segments per Jetty before back-pressure.",
-                                      UintegerValue(10000),
+                                      UintegerValue(512),
                                       MakeUintegerAccessor(&UbJetty::m_inflightMax),
+                                      MakeUintegerChecker<uint32_t>())
+                        .AddAttribute("TaSegmentBytes",
+                                      "TA WQE segment size in bytes.",
+                                      UintegerValue(UB_WQE_TA_SEGMENT_BYTE),
+                                      MakeUintegerAccessor(&UbJetty::m_taSegmentBytes),
                                       MakeUintegerChecker<uint32_t>());
     return tid;
 }
@@ -194,6 +213,41 @@ void UbJetty::Init()
 void UbJetty::SetClientCallback(Callback<void, uint32_t, uint32_t> cb)
 {
     FinishCallback = cb;
+}
+
+void UbJetty::SetCompletionObserver(Callback<void, uint32_t, uint32_t> cb)
+{
+    m_completionObserver = cb;
+}
+
+bool
+UbJetty::CanAcceptWqe(Ptr<UbWqe> wqe) const
+{
+    if (wqe == nullptr)
+    {
+        return false;
+    }
+    if (wqe->GetSrc() != m_src)
+    {
+        return false;
+    }
+    if (HasBoundDest() && wqe->GetDest() != m_dest)
+    {
+        return false;
+    }
+    return true;
+}
+
+void UbJetty::SetTaSegmentBytes(uint32_t bytes)
+{
+    NS_ABORT_MSG_IF(bytes == 0 || bytes > UB_WQE_TA_SEGMENT_BYTE,
+                    "TA segment bytes must be in [1, UB_WQE_TA_SEGMENT_BYTE]");
+    m_taSegmentBytes = bytes;
+}
+
+uint32_t UbJetty::GetTaSegmentBytes() const
+{
+    return m_taSegmentBytes;
 }
 
 
@@ -249,8 +303,8 @@ Ptr<UbWqeSegment> UbJetty::GetNextWqeSegment()
     }
 
     uint64_t segmentSize = currentWqe->GetBytesLeft();
-    if (segmentSize > UB_WQE_TA_SEGMENT_BYTE) {
-        segmentSize = UB_WQE_TA_SEGMENT_BYTE;
+    if (segmentSize > m_taSegmentBytes) {
+        segmentSize = m_taSegmentBytes;
     }
 
     Ptr<UbWqeSegment> segment = GenWqeSegment(currentWqe, segmentSize);
@@ -282,6 +336,14 @@ Ptr<UbWqeSegment> UbJetty::GenWqeSegment(Ptr<UbWqe> wqe, uint32_t segmentSize)
     // 设置任务描述信息（从WQE复制）
     segment->SetSrc(wqe->GetSrc());
     segment->SetDest(wqe->GetDest());
+    if (wqe->HasSrcEntityId())
+    {
+        segment->SetSrcEntityId(wqe->GetSrcEntityId());
+    }
+    if (wqe->HasDstEntityId())
+    {
+        segment->SetDstEntityId(wqe->GetDstEntityId());
+    }
     segment->SetSport(wqe->GetSport());
     segment->SetDport(wqe->GetDport());
     segment->SetType(wqe->GetType());
@@ -321,10 +383,12 @@ Ptr<UbWqeSegment> UbJetty::GenWqeSegment(Ptr<UbWqe> wqe, uint32_t segmentSize)
 
 void UbJetty::PushWqe(Ptr<UbWqe> ubWqe)
 {
+    NS_ABORT_MSG_IF(!CanAcceptWqe(ubWqe),
+                    "WQE is not compatible with Jetty source/destination binding");
     ubWqe->SetJettyNum(m_jettyNum);
     ubWqe->SetTaMsn(m_taMsnCnt);
     ubWqe->SetTaSsnStart(m_taSsnCnt);
-    uint64_t ssnSize = (ubWqe->GetSize() + UB_WQE_TA_SEGMENT_BYTE - 1) / UB_WQE_TA_SEGMENT_BYTE;
+    uint64_t ssnSize = (ubWqe->GetSize() + m_taSegmentBytes - 1) / m_taSegmentBytes;
     ubWqe->SetTaSsnSize(ssnSize);
     // Assign request identity only after Jetty binding is known.
     ubWqe->SetSegmentKind(UbTransactionSegmentKind::REQUEST);
@@ -448,7 +512,12 @@ void UbJetty::CheckAndRemoveCompletedWqe()
             ubTa->WqeFinish(m_jettyNum, *it);
             // 从vector中移除已完成的WQE
             it = m_wqeVector.erase(it);
-            FinishCallback(wqeId, m_jettyNum); // 调用应用层的回调
+            if (!m_completionObserver.IsNull()) {
+                m_completionObserver(wqeId, m_jettyNum);
+            }
+            if (!FinishCallback.IsNull()) {
+                FinishCallback(wqeId, m_jettyNum); // 调用应用层的回调
+            }
             // trigger tp
             ubTa->TriggerTpTransmit(m_jettyNum);
         } else {

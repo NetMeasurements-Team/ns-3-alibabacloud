@@ -10,6 +10,12 @@
 #include "ns3/log.h"
 #include "ns3/random-variable-stream.h"
 #include <mutex>
+
+namespace ns3
+{
+class UbController;
+}
+
 namespace utils {
 /**
  * @brief tp-config.csv 中定义的数据结构
@@ -65,6 +71,18 @@ public:
                                   uint32_t peerPort = UINT32_MAX,
                                   uint32_t priority = UINT32_MAX);
 
+    /**
+     * @brief Reserve connection records without materializing either TP endpoint.
+     * @param useShortestPath Whether reserved paths must use shortest routes.
+     * @param localNodeId Local node identifier.
+     * @param peerNodeId Peer node identifier.
+     * @param priority Traffic priority associated with the reservation.
+     */
+    void ReserveTpnsForTraffic(bool useShortestPath,
+                               uint32_t localNodeId,
+                               uint32_t peerNodeId,
+                               uint32_t priority);
+
     // 1. 获取节点相关的所有连接
     std::vector<Connection> GetNodeConnections(uint32_t nodeId) const;
 
@@ -118,6 +136,17 @@ public:
     // 获取与该tp相关的conn，所有优先级
     Connection GetConnection(uint32_t tpn, uint32_t src, uint32_t dst);
 
+    /**
+     * @brief Find a reservation by the local node and local TPN.
+     * @param localNodeId Local node identifier.
+     * @param localTpn Locally assigned transport path number.
+     * @param connection Output connection arranged from the local node's perspective.
+     * @return True when a matching reservation exists.
+     */
+    bool TryGetLocalConnection(uint32_t localNodeId,
+                               uint32_t localTpn,
+                               Connection& connection) const;
+
     // 清空指定节点的连接
     void ClearNodeConnections(uint32_t nodeId);
 
@@ -134,25 +163,34 @@ public:
         return m_removeUselessTp;
     }
 private:
-    uint32_t ReserveNextTpnLocked();
+  friend class ns3::UbController;
 
-    // 为指定节点建立各种索引
-    void BuildIndexesForNode(uint32_t localNodeId, Connection conn);
+  static std::mutex g_tpConnectionControlLock;
 
-    // 从索引中清理指定节点
-    void ClearNodeFromIndexes(uint32_t nodeId);
+  uint32_t ReserveNextTpnLocked();
 
-    // 创建新的tp对
-    std::vector<uint32_t> CreateNewTps(uint32_t src, uint32_t dst, uint32_t priority,
-        bool useShortestPath, bool useMultiPath);
+  // 为指定节点建立各种索引
+  void BuildIndexesForNode(uint32_t localNodeId, Connection conn);
 
-    // 重建tp对
-    std::vector<uint32_t> ReconstructTPs(std::vector<uint32_t> tpns, uint32_t src, uint32_t dst, uint32_t priority,
-        bool useShortestPath, bool useMultiPath);
+  // 从索引中清理指定节点
+  void ClearNodeFromIndexes(uint32_t nodeId);
 
-    uint32_t CreateNewTp(Connection conn);
+  // Reserve new TP connection records and return their local TPN/metric pairs.
+  std::vector<std::pair<uint32_t, uint32_t>> ReserveNewTpConnections(uint32_t src,
+                                                                     uint32_t dst,
+                                                                     uint32_t priority,
+                                                                     bool useShortestPath);
 
-    uint32_t ReconstructTp(Connection conn);
+  // 重建tp对
+  std::vector<uint32_t> ReconstructTPs(std::vector<uint32_t> tpns,
+                                       uint32_t src,
+                                       uint32_t dst,
+                                       uint32_t priority,
+                                       bool useShortestPath,
+                                       bool useMultiPath);
+
+  uint32_t ReconstructTp(Connection conn);
+
 private:
     // 主存储：所有连接
     std::vector<Connection> m_allConnections;
@@ -171,6 +209,9 @@ private:
 
     // 索引5: (localNodeId, peerNodeId, localPort, peerPort) -> connections
     std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, std::vector<Connection>> m_bothPortsIndex;
+
+    // 索引6: (localNodeId, localTpn) -> connection
+    std::map<std::pair<uint32_t, uint32_t>, Connection> m_localTpnIndex;
 
     std::set<uint32_t> m_tpnList;
     std::set<uint32_t> m_reservedTpnList;

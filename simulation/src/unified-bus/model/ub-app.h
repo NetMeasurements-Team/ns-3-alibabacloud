@@ -4,6 +4,8 @@
 
 #include <vector>
 #include <set>
+#include <map>
+#include <tuple>
 #include "ns3/application.h"
 #include "ns3/event-id.h"
 #include "ns3/ptr.h"
@@ -13,7 +15,7 @@
 #include "ns3/ub-ldst-api.h"
 #include "ub-tp-connection-manager.h"
 #include "ub-network-address.h"
-#include "ns3/random-variable-stream.h"
+#include "ub-traffic-gen.h"
 
 using namespace utils;
 namespace ns3 {
@@ -29,9 +31,44 @@ public:
     virtual ~UbApp();
 
     void SendTraffic(TrafficRecord record);
+    void SendTraffic(UbTrafficGen::RuntimeTask task);
     void SendTrafficForTest(TrafficRecord record);
+    void SendCtpUrmaTraffic(TrafficRecord record);
+    void SendCtpUrmaTraffic(UbTrafficGen::RuntimeTask task);
+    Ptr<UbJetty> GetOrCreateCtpBoundJetty(uint32_t sourceNode,
+                                          uint32_t destNode,
+                                          uint32_t srcEntityId,
+                                          uint32_t dstEntityId,
+                                          uint8_t vl,
+                                          uint32_t* jettyNum);
+    Ptr<UbJetty> GetOrCreateCtpUnboundJetty(uint32_t sourceNode,
+                                            uint32_t srcEntityId,
+                                            uint8_t vl,
+                                            uint32_t* jettyNum);
 
     void SetNode(Ptr<Node> node); // 设置当前节点
+
+    void SetTransportMode(TransportMode mode);
+    void SetLocalEntityId(uint32_t localEntityId);
+    void SetPeerEntityId(uint32_t peerEntityId);
+
+    /**
+     * @brief Get the configured transport mode.
+     * @return Transport mode used by this application.
+     */
+    TransportMode GetTransportMode() const
+    {
+        return m_transportMode;
+    }
+
+    /**
+     * @brief Get whether shortest paths are required.
+     * @return True when the application is configured to use shortest paths.
+     */
+    bool GetUseShortestPaths() const
+    {
+        return m_useShortestPaths;
+    }
 
     void SetGetTpnRule(GetTpnRuleT type)
     {
@@ -41,6 +78,11 @@ public:
     void SetUseShortestPaths(bool useShortestPaths)
     {
         m_useShortestPaths = useShortestPaths;
+    }
+
+    void SetUsePacketSpray(bool usePacketSpray)
+    {
+        m_usePacketSpray = usePacketSpray;
     }
 
     /**
@@ -70,24 +112,23 @@ private:
     void WriteNotifyTaskStarts(uint32_t nodeId, uint32_t jettyNum, uint32_t baseTaskId);
     void WriteNotifyTaskCompletes(uint32_t nodeId, uint32_t jettyNum, uint32_t baseTaskId);
 
-    map<std::string, TaOpcode> TaOpcodeMap = {
-        {"URMA_WRITE", TaOpcode::TA_OPCODE_WRITE},
-        {"URMA_READ", TaOpcode::TA_OPCODE_READ},
-        {"MEM_STORE", TaOpcode::TA_OPCODE_WRITE},
-        {"MEM_LOAD", TaOpcode::TA_OPCODE_READ}
-    };
-
     // 控制器
     bool m_multiPathEnable = false;
 
     GetTpnRuleT m_getTpnRule = GetTpnRuleT::BY_PEERNODE_PRIORITY;
     bool m_useShortestPaths = true;
+    bool m_usePacketSpray = false;
+    bool m_ctpUseUnboundSourceJetty = false;
+    std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint8_t>, uint32_t>
+        m_ctpBoundJettyByFullKey;
+    std::map<std::tuple<uint32_t, uint32_t, uint8_t>, uint32_t> m_ctpUnboundJettyBySourceEntityVl;
 
     Ptr<Node> m_node;              // 当前节点
 
     uint32_t m_jettyNum = 0;       // 当前节点维护的jettynum,不会重复
-
-    Ptr<UniformRandomVariable> m_random;
+    TransportMode m_transportMode{TransportMode::RTP};
+    uint32_t m_localEntityId{0};
+    uint32_t m_peerEntityId{0};
 
 };
 

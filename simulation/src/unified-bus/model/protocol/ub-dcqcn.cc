@@ -357,7 +357,6 @@ UbHostDcqcn::SchedulePacingWakeup()
         return;
     }
 
-    // if (m_pacingWakeupEvent.IsPending())
     if (!m_pacingWakeupEvent.IsExpired())
     {
         return;
@@ -429,7 +428,6 @@ UbHostDcqcn::OnReceiverDataPacketReceived(uint64_t psn,
     const Time now = Simulator::Now();
     if (!m_hasSentCnp || now - m_lastCnpSent >= m_cnpInterval)
     {
-        // if (m_pendingCnpEvent.IsPending())
         if (!m_pendingCnpEvent.IsExpired())
         {
             m_pendingCnpEvent.Cancel();
@@ -438,7 +436,6 @@ UbHostDcqcn::OnReceiverDataPacketReceived(uint64_t psn,
         return;
     }
 
-    // if (!m_pendingCnpEvent.IsPending())
     if (m_pendingCnpEvent.IsExpired())
     {
         const Time delay = (m_lastCnpSent + m_cnpInterval) - now;
@@ -540,7 +537,6 @@ UbHostDcqcn::OnSenderCongestionNotification(TpOpcode opcode,
         const double rescale =
             static_cast<double>(previousBitRate) / static_cast<double>(nextBitRate);
         m_nextAvailableSendTime = now + Seconds(outstandingDebt.GetSeconds() * rescale);
-        // if (m_pacingWakeupEvent.IsPending())
         if (!m_pacingWakeupEvent.IsExpired())
         {
             m_pacingWakeupEvent.Cancel();

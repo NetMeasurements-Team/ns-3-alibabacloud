@@ -2,9 +2,12 @@
 #ifndef UB_NETWORK_ADDRESS_H
 #define UB_NETWORK_ADDRESS_H
 
-#include <iostream>
 #include <chrono>
 #include <iomanip>
+#include <iostream>
+#include <string>
+#include <string_view>
+#include <vector>
 #include "ns3/core-module.h"
 #include "ns3/ipv4-address.h"
 using namespace std;
@@ -24,6 +27,28 @@ struct TrafficRecord
     string delay;
     int phaseId;
     vector<uint32_t> dependOnPhases;
+    uint32_t srcEntityId = 0;
+    uint32_t dstEntityId = 0;
+    bool hasSrcEntityId{false};
+    bool hasDstEntityId{false};
+};
+
+// Lightweight CSV row view. string_view fields are valid only during the parser callback.
+struct TrafficRecordView
+{
+    uint32_t taskId{0};
+    uint32_t sourceNode{0};
+    uint32_t destNode{0};
+    uint32_t dataSize{0};
+    std::string_view opType{};
+    uint8_t priority{0};
+    std::string_view delay{};
+    uint32_t phaseId{0};
+    std::string_view dependOnPhases{};
+    uint32_t srcEntityId{0};
+    uint32_t dstEntityId{0};
+    bool hasSrcEntityId{false};
+    bool hasDstEntityId{false};
 };
 
 constexpr long DEFAULT_PORT_BUFFER_SIZE = 2097152;

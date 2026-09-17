@@ -23,6 +23,14 @@
 #include "ns3/ub-tag.h"
 namespace ns3 {
 
+class UbFunction;
+class UbTransaction;
+class UbController;
+class UbPort;
+class UbWqe;
+class UbWqeSegment;
+class UbJetty;
+
 struct UbTpRecvTraceData {
     uint32_t packetUid;
     uint32_t psn;
@@ -36,14 +44,6 @@ struct UbTpRecvTraceData {
     std::string ackInfo;
     UbPacketTraceTag traceTag;
 };
-
-class UbFunction;
-class UbTransaction;
-class UbController;
-class UbPort;
-class UbWqe;
-class UbWqeSegment;
-class UbJetty;
 
 const uint32_t UB_TP_PSN_OOO_THRESHOLD = 2048;   // Jetty分段乱序阈值（用于乱序缓存等）
 
@@ -183,6 +183,15 @@ public:
     uint32_t GetTpn() const { return m_tpn; }
 
     /**
+     * @brief Get the destination transport path number.
+     * @return Destination TPN carried by this transport endpoint.
+     */
+    uint32_t GetDestTpn() const
+    {
+        return m_dstTpn;
+    }
+
+    /**
      * @brief Get size parameter
      * @return Size parameter
      */
@@ -271,6 +280,8 @@ public:
 
     uint32_t GetWqeSegmentVecSize() { return m_wqeSegmentVector.size(); }
     uint32_t GetActiveSendSegmentCount() const;
+    uint32_t GetOutstandingUnackedSegmentCount() const;
+    bool CanScheduleAnotherSegment() const;
 
     Ptr<UbCongestionControl> GetCongestionCtrlForTest() const { return m_congestionCtrl; }
     void SetCongestionControlForTest(Ptr<UbCongestionControl> cc) { m_congestionCtrl = cc; }
@@ -334,6 +345,7 @@ public:
     uint64_t GetPsnSndNxt() const;
     void SetPsnSndNxt(uint64_t psn);
     uint64_t GetPsnRecvNxt() const;
+    uint32_t GetGbnRetransmissionProgressBytesFromPsn(uint64_t psn) const;
     void ResetSegmentSendProgressFromPsn(uint64_t psn);
     void TriggerTransportTransmit();
     bool IsCcLimitedForRetransmission(uint32_t payloadBytes) const;
@@ -383,6 +395,7 @@ private:
     struct AckResponseContext
     {
         TpOpcode opcode{TpOpcode::TP_OPCODE_ACK_WITHOUT_CETPH};
+        uint8_t rspSt{0};
         uint64_t psn{0};
         bool selectiveAck{false};
         std::optional<UbSelectiveAckExtTph> selectiveAckHeader;
@@ -475,8 +488,6 @@ private:
     TracedCallback<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t> m_traceLastPacketReceivesNotify;
     TracedCallback<uint32_t, uint32_t, uint32_t> m_traceWqeSegmentSendsNotify;
     TracedCallback<uint32_t, uint32_t, uint32_t> m_traceWqeSegmentCompletesNotify;
-    // TracedCallback<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
-    //                uint32_t, PacketType, uint32_t, uint32_t, std::string, UbPacketTraceTag> m_tpRecvNotify;
     TracedCallback<UbTpRecvTraceData> m_tpRecvNotify;
     TracedCallback<uint32_t, uint32_t, uint64_t, uint32_t> m_traceSelectiveRetransmit;
 
@@ -491,8 +502,6 @@ private:
     void WqeSegmentSendsNotify(uint32_t nodeId, uint32_t taskId, uint32_t taSsn);
     void WqeSegmentCompletesNotify(uint32_t nodeId, uint32_t taskId, uint32_t taSsn);
     void TpRecvNotify(UbTpRecvTraceData data);
-    // void TpRecvNotify(uint32_t packetUid, uint32_t psn, uint32_t src, uint32_t dst, uint32_t srcTpn, uint32_t dstTpn,
-    //                   PacketType type, uint32_t size, uint32_t taskId, std::string ackInfo, UbPacketTraceTag traceTag);
     // Node and controller references
     uint32_t m_nodeId;
 

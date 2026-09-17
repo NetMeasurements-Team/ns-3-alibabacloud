@@ -8,6 +8,7 @@
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE("UbHeader");
+NS_OBJECT_ENSURE_REGISTERED(UbCtpHeader);
 
 /*
  ***************************************************
@@ -766,6 +767,264 @@ uint8_t UbIpBasedNetworkHeader::GetFecn() const
 
 /*
  ***************************************************
+ * UbCtpHeader implementation
+ ***************************************************
+ */
+UbCtpHeader::UbCtpHeader() = default;
+
+UbCtpHeader::~UbCtpHeader() = default;
+
+TypeId
+UbCtpHeader::GetTypeId(void)
+{
+    static TypeId tid = TypeId("ns3::UbCtpHeader")
+                            .SetParent<Header>()
+                            .SetGroupName("UnifiedBus")
+                            .AddConstructor<UbCtpHeader>();
+    return tid;
+}
+
+TypeId
+UbCtpHeader::GetInstanceTypeId(void) const
+{
+    return GetTypeId();
+}
+
+void
+UbCtpHeader::Print(std::ostream& os) const
+{
+    os << "CTPH opcode=" << static_cast<uint32_t>(m_tpOpcode)
+       << " padding=" << static_cast<uint32_t>(m_padding)
+       << " nlp=" << static_cast<uint32_t>(m_nlp);
+}
+
+uint32_t
+UbCtpHeader::GetSerializedSize(void) const
+{
+    return 1;
+}
+
+void
+UbCtpHeader::Serialize(Buffer::Iterator start) const
+{
+    start.WriteU8(static_cast<uint8_t>(((m_tpOpcode & 0x3) << 6) |
+                                       ((m_padding & 0x3) << 4) |
+                                       (m_nlp & 0xF)));
+}
+
+uint32_t
+UbCtpHeader::Deserialize(Buffer::Iterator start)
+{
+    const uint8_t packed = start.ReadU8();
+    m_tpOpcode = (packed >> 6) & 0x3;
+    m_padding = (packed >> 4) & 0x3;
+    m_nlp = packed & 0xF;
+    return GetSerializedSize();
+}
+
+void
+UbCtpHeader::SetTPOpcode(uint8_t opcode)
+{
+    NS_ABORT_MSG_IF(opcode > 0x3, "CTPH TPOpcode must fit in 2 bits");
+    m_tpOpcode = opcode;
+}
+
+void
+UbCtpHeader::SetTPOpcode(CtpOpcode opcode)
+{
+    SetTPOpcode(static_cast<uint8_t>(opcode));
+}
+
+void
+UbCtpHeader::SetPadding(uint8_t padding)
+{
+    NS_ABORT_MSG_IF(padding > 0x3, "CTPH padding must fit in 2 bits");
+    m_padding = padding;
+}
+
+void
+UbCtpHeader::SetNlp(uint8_t nlp)
+{
+    NS_ABORT_MSG_IF(nlp > 0xF, "CTPH NLP must fit in 4 bits");
+    m_nlp = nlp;
+}
+
+uint8_t
+UbCtpHeader::GetTPOpcode() const
+{
+    return m_tpOpcode;
+}
+
+uint8_t
+UbCtpHeader::GetPadding() const
+{
+    return m_padding;
+}
+
+uint8_t
+UbCtpHeader::GetNlp() const
+{
+    return m_nlp;
+}
+
+/*
+ ***************************************************
+ * UbCompactUpiHeader implementation
+ ***************************************************
+ */
+UbCompactUpiHeader::UbCompactUpiHeader() = default;
+
+UbCompactUpiHeader::~UbCompactUpiHeader() = default;
+
+TypeId
+UbCompactUpiHeader::GetTypeId(void)
+{
+    static TypeId tid = TypeId("ns3::UbCompactUpiHeader")
+                            .SetParent<Header>()
+                            .SetGroupName("UnifiedBus")
+                            .AddConstructor<UbCompactUpiHeader>();
+    return tid;
+}
+
+TypeId
+UbCompactUpiHeader::GetInstanceTypeId(void) const
+{
+    return GetTypeId();
+}
+
+void
+UbCompactUpiHeader::Print(std::ostream& os) const
+{
+    os << "CompactUPIH upi=" << m_upi;
+}
+
+uint32_t
+UbCompactUpiHeader::GetSerializedSize(void) const
+{
+    return 2;
+}
+
+void
+UbCompactUpiHeader::Serialize(Buffer::Iterator start) const
+{
+    NS_ABORT_MSG_IF(m_upi > UB_COMPACT_UPI_MAX, "Compact UPI must fit in 15 bits");
+    start.WriteHtonU16(m_upi);
+}
+
+uint32_t
+UbCompactUpiHeader::Deserialize(Buffer::Iterator start)
+{
+    m_upi = start.ReadNtohU16() & UB_COMPACT_UPI_MAX;
+    return GetSerializedSize();
+}
+
+void
+UbCompactUpiHeader::SetUpi(uint16_t upi)
+{
+    NS_ABORT_MSG_IF(upi > UB_COMPACT_UPI_MAX, "Compact UPI must fit in 15 bits");
+    m_upi = upi;
+}
+
+uint16_t
+UbCompactUpiHeader::GetUpi() const
+{
+    return m_upi;
+}
+
+/*
+ ***************************************************
+ * UbCompactEidHeader implementation
+ ***************************************************
+ */
+UbCompactEidHeader::UbCompactEidHeader() = default;
+
+UbCompactEidHeader::~UbCompactEidHeader() = default;
+
+TypeId
+UbCompactEidHeader::GetTypeId(void)
+{
+    static TypeId tid = TypeId("ns3::UbCompactEidHeader")
+                            .SetParent<Header>()
+                            .SetGroupName("UnifiedBus")
+                            .AddConstructor<UbCompactEidHeader>();
+    return tid;
+}
+
+TypeId
+UbCompactEidHeader::GetInstanceTypeId(void) const
+{
+    return GetTypeId();
+}
+
+void
+UbCompactEidHeader::Print(std::ostream& os) const
+{
+    os << "CompactEIDH seid=" << m_sourceEid << " deid=" << m_destinationEid;
+}
+
+uint32_t
+UbCompactEidHeader::GetSerializedSize(void) const
+{
+    return 5;
+}
+
+void
+UbCompactEidHeader::Serialize(Buffer::Iterator start) const
+{
+    NS_ABORT_MSG_IF(m_sourceEid > UB_COMPACT_EID_MAX, "Compact SEID must fit in 20 bits");
+    NS_ABORT_MSG_IF(m_destinationEid > UB_COMPACT_EID_MAX, "Compact DEID must fit in 20 bits");
+
+    const uint64_t packed = (static_cast<uint64_t>(m_sourceEid & UB_COMPACT_EID_MAX) << 20) |
+                            static_cast<uint64_t>(m_destinationEid & UB_COMPACT_EID_MAX);
+    start.WriteU8(static_cast<uint8_t>((packed >> 32) & 0xff));
+    start.WriteU8(static_cast<uint8_t>((packed >> 24) & 0xff));
+    start.WriteU8(static_cast<uint8_t>((packed >> 16) & 0xff));
+    start.WriteU8(static_cast<uint8_t>((packed >> 8) & 0xff));
+    start.WriteU8(static_cast<uint8_t>(packed & 0xff));
+}
+
+uint32_t
+UbCompactEidHeader::Deserialize(Buffer::Iterator start)
+{
+    uint64_t packed = 0;
+    packed |= static_cast<uint64_t>(start.ReadU8()) << 32;
+    packed |= static_cast<uint64_t>(start.ReadU8()) << 24;
+    packed |= static_cast<uint64_t>(start.ReadU8()) << 16;
+    packed |= static_cast<uint64_t>(start.ReadU8()) << 8;
+    packed |= static_cast<uint64_t>(start.ReadU8());
+    m_sourceEid = static_cast<uint32_t>((packed >> 20) & UB_COMPACT_EID_MAX);
+    m_destinationEid = static_cast<uint32_t>(packed & UB_COMPACT_EID_MAX);
+    return GetSerializedSize();
+}
+
+void
+UbCompactEidHeader::SetSourceEid(uint32_t eid)
+{
+    NS_ABORT_MSG_IF(eid > UB_COMPACT_EID_MAX, "Compact SEID must fit in 20 bits");
+    m_sourceEid = eid;
+}
+
+void
+UbCompactEidHeader::SetDestinationEid(uint32_t eid)
+{
+    NS_ABORT_MSG_IF(eid > UB_COMPACT_EID_MAX, "Compact DEID must fit in 20 bits");
+    m_destinationEid = eid;
+}
+
+uint32_t
+UbCompactEidHeader::GetSourceEid() const
+{
+    return m_sourceEid;
+}
+
+uint32_t
+UbCompactEidHeader::GetDestinationEid() const
+{
+    return m_destinationEid;
+}
+
+/*
+ ***************************************************
  * UbTransportHeader implementation
  ***************************************************
  */
@@ -1010,7 +1269,13 @@ uint8_t UbTransportHeader::GetRspInfo() const
 // Check validity methods
 bool UbTransportHeader::IsValidOpcode() const
 {
-    return m_tpOpcode <= static_cast<uint8_t>(TpOpcode::TP_OPCODE_CNP);
+    return m_tpOpcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_UNRELIABLE_TA) ||
+           m_tpOpcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_RELIABLE_TA) ||
+           m_tpOpcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_ACK_WITHOUT_CETPH) ||
+           m_tpOpcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_ACK_WITH_CETPH) ||
+           m_tpOpcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_SACK_WITHOUT_CETPH) ||
+           m_tpOpcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_SACK_WITH_CETPH) ||
+           m_tpOpcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_CNP);
 }
 
 bool UbTransportHeader::IsValidNLP() const
