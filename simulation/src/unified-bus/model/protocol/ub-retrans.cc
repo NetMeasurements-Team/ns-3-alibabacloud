@@ -79,7 +79,7 @@ UbGbnRetransStrategy::OnDataPacketReceived(uint64_t psn)
     m_lastNakPsn = nakPsn;
     decision.shouldNak = true;
     decision.responsePsn = nakPsn;
-    decision.responseOpcode = TpOpcode::TP_OPCODE_NAK_WITHOUT_CETPH;
+    decision.responseOpcode = m_controller.GetTransport().GetResponseOpcodeForRetrans(false);
     return decision;
 }
 
@@ -970,7 +970,12 @@ UbRetransController::OnTransportNak(const UbTransportHeader& tph)
             result.ignoreResponse = true;
             return result;
         }
+        result.retransmitBytes =
+            m_transport.GetGbnRetransmissionProgressBytesFromPsn(*logicalNakPsn);
         result.triggerTransmit = m_gbn->HandleTpNak(*logicalNakPsn);
+        if (!result.triggerTransmit) {
+            result.retransmitBytes = 0;
+        }
     }
     return result;
 }

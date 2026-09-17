@@ -6,6 +6,8 @@
 #include "protocol/ub-transport.h"
 #include "ub-queue-manager.h"
 
+#include <algorithm>
+
 namespace ns3 {
 
 namespace {
@@ -108,7 +110,83 @@ void UbSwitchAllocator::Init()
 
 void UbSwitchAllocator::RegisterUbIngressQueue(Ptr<UbIngressQueue> ingressQueue, uint32_t outPort, uint32_t priority)
 {
-    m_ingressSources[outPort][priority].push_back(ingressQueue);
+    auto& queues = m_ingressSources[outPort][priority];
+    if (ingressQueue->GetIngressQueueType() != IngressQueueType::VOQ) {
+        queues.push_back(ingressQueue);
+        return;
+    }
+
+    const uint32_t inPort = ingressQueue->GetInPortId();
+    auto insertAt = queues.begin();
+    for (; insertAt != queues.end(); ++insertAt) {
+        Ptr<UbIngressQueue> existing = *insertAt;
+        if (existing->GetIngressQueueType() != IngressQueueType::VOQ ||
+            existing->GetInPortId() > inPort) {
+            break;
+        }
+    }
+    queues.insert(insertAt, ingressQueue);
+}
+
+uint32_t
+UbSwitchAllocator::GetIngressQueueSlotCount(uint32_t outPort, uint32_t priority) const
+{
+    const auto& queues = m_ingressSources[outPort][priority];
+    uint32_t nonVoqCount = 0;
+    for (const auto& queue : queues) {
+        if (queue->GetIngressQueueType() != IngressQueueType::VOQ) {
+            ++nonVoqCount;
+        }
+    }
+    return m_voqIngressSlotCount + nonVoqCount;
+}
+
+std::optional<UbSwitchAllocator::IngressCandidate>
+UbSwitchAllocator::FindNextEligibleIngressQueue(uint32_t outPort,
+                                                uint32_t priority,
+                                                uint32_t startIngressQueueSlot,
+                                                Ptr<UbPort> egressPort) const
+{
+    const auto& queues = m_ingressSources[outPort][priority];
+    const uint32_t ingressQueueSlotCount = GetIngressQueueSlotCount(outPort, priority);
+    if (ingressQueueSlotCount == 0 || queues.empty()) {
+        return std::nullopt;
+    }
+
+    std::optional<IngressCandidate> bestAtOrAfterStart;
+    std::optional<IngressCandidate> bestWrapped;
+    uint32_t nonVoqQueueOrdinal = 0;
+
+    for (const auto& queue : queues) {
+        uint32_t ingressQueueSlot;
+        if (queue->GetIngressQueueType() == IngressQueueType::VOQ) {
+            ingressQueueSlot = queue->GetInPortId();
+        } else {
+            ingressQueueSlot = m_voqIngressSlotCount + nonVoqQueueOrdinal;
+            ++nonVoqQueueOrdinal;
+        }
+
+        if (ingressQueueSlot >= ingressQueueSlotCount || queue->IsEmpty() || queue->IsLimited() ||
+            egressPort->GetFlowControl()->IsFcLimited(queue)) {
+            continue;
+        }
+
+        IngressCandidate candidate{queue, ingressQueueSlot};
+        if (ingressQueueSlot >= startIngressQueueSlot) {
+            if (!bestAtOrAfterStart.has_value() ||
+                ingressQueueSlot < bestAtOrAfterStart->ingressQueueSlot) {
+                bestAtOrAfterStart = candidate;
+            }
+        } else if (!bestWrapped.has_value() ||
+                   ingressQueueSlot < bestWrapped->ingressQueueSlot) {
+            bestWrapped = candidate;
+        }
+    }
+
+    if (bestAtOrAfterStart.has_value()) {
+        return bestAtOrAfterStart;
+    }
+    return bestWrapped;
 }
 
 void UbSwitchAllocator::CheckDeadlock()
@@ -197,6 +275,7 @@ void UbRoundRobinAllocator::Init()
     m_ingressSources.resize(portsNum);
     m_isRunning.assign(portsNum, false);
     m_oneMoreRound.assign(portsNum, false);
+    m_voqIngressSlotCount = portsNum;
     for (auto &i : m_ingressSources) {
         i.resize(vlNum);
     }
@@ -256,29 +335,31 @@ void UbRoundRobinAllocator::AllocateNextPacket(Ptr<UbPort> outPort)
 
 Ptr<UbIngressQueue> UbRoundRobinAllocator::SelectNextIngressQueue(Ptr<UbPort> outPort)
 {
-    uint32_t idx;
     uint32_t pi;
     uint32_t outPortId = outPort->GetIfIndex();
     auto node = NodeList::GetNode(m_nodeId);
     auto vlNum = node->GetObject<UbSwitch>()->GetVLNum();
     for (pi = 0 ; pi < vlNum; pi++) {
-        size_t qSize = m_ingressSources[outPortId][pi].size();
-        if (qSize > 0 && !m_rrPhaseSeeded[outPortId][pi]) {
-            m_rrIdx[outPortId][pi] = ComputeInitialIngressPhase(m_nodeId, outPortId, qSize);
-            m_rrPhaseSeeded[outPortId][pi] = true;
-        } else if (qSize > 0 && m_rrIdx[outPortId][pi] >= qSize) {
-            m_rrIdx[outPortId][pi] %= qSize;
+        const uint32_t ingressQueueSlotCount = GetIngressQueueSlotCount(outPortId, pi);
+        if (ingressQueueSlotCount == 0) {
+            continue;
         }
-        for (idx = 0; idx < qSize; idx++) {
-            auto qidx = (idx + m_rrIdx[outPortId][pi]) % qSize;
-            if (!m_ingressSources[outPortId][pi][qidx]->IsEmpty() &&
-                !m_ingressSources[outPortId][pi][qidx]->IsLimited() &&
-                !outPort->GetFlowControl()->IsFcLimited(m_ingressSources[outPortId][pi][qidx])) {
-                m_rrIdx[outPortId][pi] = (qidx + 1) % qSize;
-                NS_LOG_DEBUG("[UbSwitchAllocator DispatchPacket] " << " NodeId: " << node->GetId()
-                << " PortId: " << outPortId <<" qidx: "<< qidx);
-                return m_ingressSources[outPortId][pi][qidx];
-            }
+        if (!m_rrPhaseSeeded[outPortId][pi]) {
+            m_rrIdx[outPortId][pi] =
+                ComputeInitialIngressPhase(m_nodeId, outPortId, ingressQueueSlotCount);
+            m_rrPhaseSeeded[outPortId][pi] = true;
+        } else if (m_rrIdx[outPortId][pi] >= ingressQueueSlotCount) {
+            m_rrIdx[outPortId][pi] %= ingressQueueSlotCount;
+        }
+        auto candidate =
+            FindNextEligibleIngressQueue(outPortId, pi, m_rrIdx[outPortId][pi], outPort);
+        if (candidate.has_value()) {
+            m_rrIdx[outPortId][pi] = (candidate->ingressQueueSlot + 1) % ingressQueueSlotCount;
+            NS_LOG_DEBUG("[UbSwitchAllocator DispatchPacket] " << " NodeId: " << node->GetId()
+                                                              << " PortId: " << outPortId
+                                                              << " ingressQueueSlot: "
+                                                              << candidate->ingressQueueSlot);
+            return candidate->queue;
         }
     }
     return nullptr;
@@ -316,11 +397,12 @@ void UbDwrrAllocator::Init()
     m_rrPhaseSeeded.assign(portsNum, std::vector<bool>(vlNum, false));
     m_quantum.assign(portsNum, std::vector<uint32_t>(vlNum, 0));
     m_deficit.assign(portsNum, std::vector<uint32_t>(vlNum, 0));
-    m_lastSelectedQIdx.assign(portsNum, std::vector<uint32_t>(vlNum, 0));
+    m_lastSelectedIngressQueueSlot.assign(portsNum, std::vector<uint32_t>(vlNum, 0));
     m_currVlIdx.assign(portsNum, 0);
 
     m_isRunning.assign(portsNum, false);
     m_oneMoreRound.assign(portsNum, false);
+    m_voqIngressSlotCount = portsNum;
 
     m_ingressSources.resize(portsNum);
     for (auto &i : m_ingressSources) {
@@ -365,49 +447,40 @@ Ptr<UbIngressQueue> UbDwrrAllocator::SelectNextIngressQueue(Ptr<UbPort> outPort)
 
     for (uint32_t cnt = 0; cnt < vlNum; ++cnt) {
         uint32_t pi = (startVl + cnt) % vlNum;
-        auto &queues = m_ingressSources[outPortId][pi];
-        size_t qSize = queues.size();
+        const uint32_t ingressQueueSlotCount = GetIngressQueueSlotCount(outPortId, pi);
 
-        if (qSize == 0) {
+        if (ingressQueueSlotCount == 0) {
             m_deficit[outPortId][pi] = 0;
             continue;
         }
 
         if (!m_rrPhaseSeeded[outPortId][pi]) {
-            m_rrIdx[outPortId][pi] = ComputeInitialIngressPhase(m_nodeId, outPortId, qSize);
+            m_rrIdx[outPortId][pi] =
+                ComputeInitialIngressPhase(m_nodeId, outPortId, ingressQueueSlotCount);
             m_rrPhaseSeeded[outPortId][pi] = true;
-        } else if (m_rrIdx[outPortId][pi] >= qSize) {
-            m_rrIdx[outPortId][pi] %= qSize;
+        } else if (m_rrIdx[outPortId][pi] >= ingressQueueSlotCount) {
+            m_rrIdx[outPortId][pi] %= ingressQueueSlotCount;
         }
 
-        bool hasNonEmpty = false;
-        for (uint32_t idx = 0; idx < qSize; ++idx) {
-            uint32_t qidx = (idx + m_rrIdx[outPortId][pi]) % qSize;
-            auto q = queues[qidx];
-
-            if (!q->IsEmpty() &&
-                !q->IsLimited() &&
-                !outPort->GetFlowControl()->IsFcLimited(q)) {
-                hasNonEmpty = true;
-
-                m_deficit[outPortId][pi] += m_quantum[outPortId][pi];
-                m_lastSelectedQIdx[outPortId][pi] = qidx;
-                m_rrIdx[outPortId][pi] = (qidx + 1) % qSize;
-                m_currVlIdx[outPortId] = (pi + 1) % vlNum;
-
-                NS_LOG_DEBUG("[UbDwrrAllocator SelectNextIngressQueue]"
-                             << " NodeId: " << node->GetId()
-                             << " OutPortId: " << outPortId
-                             << " VL: " << pi
-                             << " qidx: " << qidx
-                             << " deficit: " << m_deficit[outPortId][pi]);
-                return q;
-            }
-        }
-
-        if (!hasNonEmpty) {
+        auto candidate =
+            FindNextEligibleIngressQueue(outPortId, pi, m_rrIdx[outPortId][pi], outPort);
+        if (!candidate.has_value()) {
             m_deficit[outPortId][pi] = 0;
+            continue;
         }
+
+        m_deficit[outPortId][pi] += m_quantum[outPortId][pi];
+        m_lastSelectedIngressQueueSlot[outPortId][pi] = candidate->ingressQueueSlot;
+        m_rrIdx[outPortId][pi] = (candidate->ingressQueueSlot + 1) % ingressQueueSlotCount;
+        m_currVlIdx[outPortId] = (pi + 1) % vlNum;
+
+        NS_LOG_DEBUG("[UbDwrrAllocator SelectNextIngressQueue]"
+                     << " NodeId: " << node->GetId()
+                     << " OutPortId: " << outPortId
+                     << " VL: " << pi
+                     << " ingressQueueSlot: " << candidate->ingressQueueSlot
+                     << " deficit: " << m_deficit[outPortId][pi]);
+        return candidate->queue;
     }
 
     return nullptr;
@@ -426,35 +499,23 @@ void UbDwrrAllocator::AllocateNextPacket(Ptr<UbPort> outPort)
         auto priority = ingressQueue->GetIngressPriority();
         uint32_t pi = priority;
         auto &queues = m_ingressSources[outPortId][pi];
-        size_t qSize = queues.size();
-        if (qSize > 0) {
-            uint32_t qidx = m_lastSelectedQIdx[outPortId][pi];
+        uint32_t ingressQueueSlotCount = GetIngressQueueSlotCount(outPortId, pi);
+        if (ingressQueueSlotCount > 0) {
+            uint32_t ingressQueueSlot =
+                m_lastSelectedIngressQueueSlot[outPortId][pi] % ingressQueueSlotCount;
             uint32_t &deficit = m_deficit[outPortId][pi];
 
             bool first = true;
 
-            while (deficit > 0 && qSize > 0) {
-                auto q = queues[qidx];
-
-                if (q->IsEmpty() || outPort->GetFlowControl()->IsFcLimited(q)) {
-                    bool found = false;
-                    for (uint32_t i = 0; i < qSize; ++i) {
-                        uint32_t candIdx = (qidx + i) % qSize;
-                        auto candQ = queues[candIdx];
-                        if (!candQ->IsEmpty() &&
-                            !candQ->IsLimited() &&
-                            !outPort->GetFlowControl()->IsFcLimited(candQ)) {
-                            qidx = candIdx;
-                            q = candQ;
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        deficit = 0;
-                        break;
-                    }
+            while (deficit > 0 && ingressQueueSlotCount > 0) {
+                auto candidate =
+                    FindNextEligibleIngressQueue(outPortId, pi, ingressQueueSlot, outPort);
+                if (!candidate.has_value()) {
+                    deficit = 0;
+                    break;
                 }
+                auto q = candidate->queue;
+                ingressQueueSlot = candidate->ingressQueueSlot;
 
                 uint32_t pktSize = q->GetNextPacketSize();
                 if (!outPort->GetUbQueue()->CanEnqueue(pktSize)) {
@@ -467,7 +528,7 @@ void UbDwrrAllocator::AllocateNextPacket(Ptr<UbPort> outPort)
                 // 第一个包就发不出去：不扣赤字，并回滚 m_rrIdx
                 if (pktSize > deficit) {
                     if (!sentAny) {
-                        m_rrIdx[outPortId][pi] = qidx;
+                        m_rrIdx[outPortId][pi] = ingressQueueSlot;
                     }
                     break;
                 }
@@ -499,11 +560,16 @@ void UbDwrrAllocator::AllocateNextPacket(Ptr<UbPort> outPort)
                 deficit -= pktSize;
 
                 if (first) {
-                    qidx = m_rrIdx[outPortId][pi];
+                    ingressQueueSlot = m_rrIdx[outPortId][pi];
                     first = false;
                 } else {
-                    m_rrIdx[outPortId][pi] = (qidx + 1) % qSize;
-                    qidx = m_rrIdx[outPortId][pi];
+                    ingressQueueSlotCount = GetIngressQueueSlotCount(outPortId, pi);
+                    if (ingressQueueSlotCount == 0) {
+                        break;
+                    }
+                    m_rrIdx[outPortId][pi] =
+                        (ingressQueueSlot + 1) % ingressQueueSlotCount;
+                    ingressQueueSlot = m_rrIdx[outPortId][pi];
                 }
             }
 
@@ -585,7 +651,6 @@ void UbDwrrAllocator::ParseAndApplyVlQuantums(const std::string& s)
         long vl = std::strtol(vlStr.c_str(), &endp, 10);
         if (endp == vlStr.c_str() || vl < 0 || (uint32_t)vl >= vlNum) {
             NS_LOG_WARN("UbDwrrAllocator::VlQuantums invalid vl: " << vlStr);
-            continue;
         }
 
         endp = nullptr;

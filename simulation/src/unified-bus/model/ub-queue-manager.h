@@ -2,9 +2,11 @@
 #ifndef UB_QUEUE_MANAGER_H
 #define UB_QUEUE_MANAGER_H
 
+#include <cstddef>
 #include "ns3/object.h"
 #include "ns3/packet.h"
 #include "ns3/simulator.h"
+#include "ns3/ub-small-fifo-queue.h"
 #include "ns3/nstime.h"
 #include "ub-datatype.h"
 #include "ub-network-address.h"
@@ -94,7 +96,7 @@ private:
 /**
  * @brief VOQ (Virtual Output Queue) implementation of ingress queue
  */
-class UbPacketQueue : public UbIngressQueue {
+class UbPacketQueue final : public UbIngressQueue {
 public:
     UbPacketQueue();
     ~UbPacketQueue() final;
@@ -102,25 +104,16 @@ public:
 
     bool IsEmpty() override;
     Ptr<Packet> GetNextPacket() override;
-    std::queue<Ptr<Packet>>& Get() {return m_queue;}
-    Ptr<Packet> Front() {return m_queue.front();}
-    void Pop() {
-        m_queue.pop();
-        if (!m_queue.empty()) {
-            m_headArrivalTime = Simulator::Now();
-        }
-    }
-    void Push(Ptr<Packet> p) {
-        if (m_queue.empty()) {
-            m_headArrivalTime = Simulator::Now();
-        }
-        m_queue.push(p);
-    }
+    Ptr<Packet> Front();
+    void Pop();
+    void Push(Ptr<Packet> p);
     IngressQueueType GetIngressQueueType() override;
     uint32_t GetNextPacketSize() override;
 
 private:
-    std::queue<Ptr<Packet>> m_queue;
+    Ptr<Packet> m_frontPacket;
+    UbSmallFifoQueue<Ptr<Packet>, 1> m_overflowQueue;
+    size_t m_packetCount = 0;
     IngressQueueType m_ingressQueueType = IngressQueueType::VOQ;
 };
 
@@ -194,6 +187,8 @@ public:
      * @brief 包离开VOQ时调用（同时更新双视图）
      */
     void PopFromVoq(uint32_t inPort, uint32_t outPort, uint32_t priority, uint32_t pSize);
+    void PushToInPortProcessing(uint32_t inPort, uint32_t outPort, uint32_t priority, uint32_t pSize);
+    void MoveInPortProcessingToVoq(uint32_t inPort, uint32_t outPort, uint32_t priority, uint32_t pSize);
     
     // ========== 查询接口：InPort视图（用于流控） ==========
     
@@ -253,6 +248,9 @@ private:
     // 双视图统计（同一个包在VOQ中，但从两个维度统计）
     DarrayU64 m_inPortBuffer;   // [inPort][priority] - 用于流控
     DarrayU64 m_outPortBuffer;  // [outPort][priority] - 用于路由和拥塞控制
+    DarrayU64 m_inPortProcessingBytes;   // [inPort][priority]
+    DarrayU64 m_outPortProcessingBytes;  // [outPort][priority]
+    uint64_t m_totalProcessingBytes {0};
 
     // 三层 buffer 状态
     uint64_t m_sharedPoolBytes {DEFAULT_SHARED_POOL_BYTES};
@@ -272,6 +270,7 @@ private:
     DarrayU64 m_outPortControlBytes; // [outPort][priority] control-frame occupancy outside data-plane admission
     Ptr<Node> m_ownerNode;
     TracedCallback<uint32_t, uint64_t> m_traceOutPortBufferBytes;
+    TracedCallback<uint32_t, uint32_t, uint64_t> m_traceIngressQueueOccupancyBytes;
 };
 } // namespace ns3
 

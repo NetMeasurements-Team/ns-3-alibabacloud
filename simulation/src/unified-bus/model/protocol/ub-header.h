@@ -500,6 +500,84 @@ private:
         static const uint32_t totalHeaderSize = 10;
     };
 
+class UbCtpHeader : public Header
+{
+  public:
+    UbCtpHeader();
+    ~UbCtpHeader() override;
+
+    static TypeId GetTypeId(void);
+    TypeId GetInstanceTypeId(void) const override;
+    void Print(std::ostream& os) const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    uint32_t GetSerializedSize(void) const override;
+
+    void SetTPOpcode(uint8_t opcode);
+    void SetTPOpcode(CtpOpcode opcode);
+    void SetPadding(uint8_t padding);
+    void SetNlp(uint8_t nlp);
+    uint8_t GetTPOpcode() const;
+    uint8_t GetPadding() const;
+    uint8_t GetNlp() const;
+
+  private:
+    uint8_t m_tpOpcode{0};
+    uint8_t m_padding{0};
+    uint8_t m_nlp{0};
+};
+
+/**
+ * \ingroup ub-header
+ * \brief UB compact UPI header, 16-bit form used by CTPH.NLP=0x2.
+ */
+class UbCompactUpiHeader : public Header
+{
+  public:
+    UbCompactUpiHeader();
+    ~UbCompactUpiHeader() override;
+
+    static TypeId GetTypeId(void);
+    TypeId GetInstanceTypeId(void) const override;
+    void Print(std::ostream& os) const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    uint32_t GetSerializedSize(void) const override;
+
+    void SetUpi(uint16_t upi);
+    uint16_t GetUpi() const;
+
+  private:
+    uint16_t m_upi{0};
+};
+
+/**
+ * \ingroup ub-header
+ * \brief UB compact EID header, 20-bit SEID followed by 20-bit DEID.
+ */
+class UbCompactEidHeader : public Header
+{
+  public:
+    UbCompactEidHeader();
+    ~UbCompactEidHeader() override;
+
+    static TypeId GetTypeId(void);
+    TypeId GetInstanceTypeId(void) const override;
+    void Print(std::ostream& os) const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    uint32_t GetSerializedSize(void) const override;
+
+    void SetSourceEid(uint32_t eid);
+    void SetDestinationEid(uint32_t eid);
+    uint32_t GetSourceEid() const;
+    uint32_t GetDestinationEid() const;
+
+  private:
+    uint32_t m_sourceEid{0};
+    uint32_t m_destinationEid{0};
+};
+
 /**
  * \ingroup ub-header
  * \brief UB Transport Header (RTPH)

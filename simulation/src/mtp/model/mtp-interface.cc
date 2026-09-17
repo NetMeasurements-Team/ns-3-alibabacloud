@@ -10,6 +10,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
+#include <optional>
+#include <tuple>
 
 namespace ns3 {
 
@@ -123,6 +126,14 @@ MtpInterface::Disable ()
   g_systemCount = 0;
   g_sortFunc = nullptr;
   g_globalFinished = false;
+  {
+    std::lock_guard<std::mutex> lock (g_orderedGlobalEventsMutex);
+    for (auto &orderedEvent : g_orderedGlobalEvents)
+      {
+        orderedEvent.event->Unref ();
+      }
+    g_orderedGlobalEvents.clear ();
+  }
   delete[] g_systems;
   delete[] g_threads;
   delete[] g_sortedSystemIndices;
@@ -194,6 +205,7 @@ MtpInterface::ProcessOneRound ()
     ;
 
   // stage 2: process the public LP
+  FlushOrderedGlobalEvents (g_smallestTime);
   g_systems[0].ProcessOneRound ();
 
   // stage 3: receive messages
@@ -218,8 +230,62 @@ MtpInterface::ProcessOneRound ()
 }
 
 void
+MtpInterface::EnqueueOrderedGlobalEvent (const Time &time, uint64_t orderKey, EventImpl *event)
+{
+  const int64_t targetTs = time.GetTimeStep ();
+  NS_ABORT_MSG_IF (targetTs < 0 || time < g_systems[0].Now () || time < GetSystem ()->Now (),
+                   "ordered public event time is earlier than its submitting or public LP");
+
+  std::lock_guard<std::mutex> lock (g_orderedGlobalEventsMutex);
+  g_orderedGlobalEvents.push_back ({targetTs, orderKey, event});
+}
+
+void
+MtpInterface::FlushOrderedGlobalEvents (const Time &throughTime)
+{
+  std::vector<OrderedGlobalEvent> pendingEvents;
+  {
+    std::lock_guard<std::mutex> lock (g_orderedGlobalEventsMutex);
+    std::sort (g_orderedGlobalEvents.begin (), g_orderedGlobalEvents.end (),
+               [] (const OrderedGlobalEvent &lhs, const OrderedGlobalEvent &rhs) {
+                 return std::tie (lhs.targetTs, lhs.orderKey) <
+                        std::tie (rhs.targetTs, rhs.orderKey);
+               });
+    const int64_t throughTs = throughTime.GetTimeStep ();
+    const auto firstFutureEvent =
+        std::find_if (g_orderedGlobalEvents.begin (), g_orderedGlobalEvents.end (),
+                      [throughTs] (const OrderedGlobalEvent &event) {
+                        return event.targetTs > throughTs;
+                      });
+    pendingEvents.insert (pendingEvents.end (),
+                          std::make_move_iterator (g_orderedGlobalEvents.begin ()),
+                          std::make_move_iterator (firstFutureEvent));
+    g_orderedGlobalEvents.erase (g_orderedGlobalEvents.begin (), firstFutureEvent);
+  }
+
+  for (auto &orderedEvent : pendingEvents)
+    {
+      g_systems[0].ScheduleAt (Simulator::NO_CONTEXT, TimeStep (orderedEvent.targetTs),
+                               orderedEvent.event);
+    }
+}
+
+void
 MtpInterface::CalculateSmallestTime ()
 {
+  std::optional<Time> nextOrderedGlobalTime;
+  {
+    std::lock_guard<std::mutex> lock (g_orderedGlobalEventsMutex);
+    for (const auto &orderedEvent : g_orderedGlobalEvents)
+      {
+        const Time targetTime = TimeStep (orderedEvent.targetTs);
+        if (!nextOrderedGlobalTime || targetTime < *nextOrderedGlobalTime)
+          {
+            nextOrderedGlobalTime = targetTime;
+          }
+      }
+  }
+
   auto now_time = g_smallestTime;
   // update smallest time
   g_smallestTime = Time::Max () / 2;
@@ -233,9 +299,14 @@ MtpInterface::CalculateSmallestTime ()
     }
 
   g_nextPublicTime = g_systems[0].Next ();
+  if (nextOrderedGlobalTime)
+    {
+      g_smallestTime = Min (g_smallestTime, *nextOrderedGlobalTime);
+      g_nextPublicTime = Min (g_nextPublicTime, *nextOrderedGlobalTime);
+    }
 
   // test if global finished
-  bool globalFinished = true;
+  bool globalFinished = !nextOrderedGlobalTime.has_value ();
   for (uint32_t i = 0; i <= g_systemCount; i++)
     {
       globalFinished &= g_systems[i].isLocalFinished ();
@@ -366,5 +437,9 @@ bool MtpInterface::g_enabled = false;
 pthread_key_t MtpInterface::g_key;
 
 std::atomic<bool> MtpInterface::g_inCriticalSection (false);
+
+std::mutex MtpInterface::g_orderedGlobalEventsMutex;
+
+std::vector<MtpInterface::OrderedGlobalEvent> MtpInterface::g_orderedGlobalEvents;
 
 } // namespace ns3

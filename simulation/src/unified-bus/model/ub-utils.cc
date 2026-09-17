@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "ub-utils.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -10,6 +11,8 @@
 #include <limits>
 #include <map>
 #include <sstream>
+#include <string_view>
+#include <unordered_map>
 #ifdef NS3_MPI
 #include "ub-remote-link.h"
 #include "ns3/mpi-interface.h"
@@ -27,7 +30,7 @@ struct LegacyNetworkAttributeKey
     const char* note;
 };
 
-constexpr std::array<LegacyNetworkAttributeKey, 4> kLegacyNetworkAttributeKeys = {{
+constexpr std::array<LegacyNetworkAttributeKey, 6> kLegacyNetworkAttributeKeys = {{
     {"ns3::UbQueueManager::ResumeOffset",
      "ns3::UbQueueManager::DynamicPfcResumeGapBytes",
      "DynamicPfcResumeGapBytes is the current dynamic-PFC XON/XOFF resume gap."},
@@ -40,6 +43,12 @@ constexpr std::array<LegacyNetworkAttributeKey, 4> kLegacyNetworkAttributeKeys =
     {"ns3::UbApiThread::",
      "ns3::UbLdstThread::",
      "LD/ST thread attributes moved to the UbLdstThread TypeId."},
+    {"ns3::UbJetty::UbInflightMax",
+     "ns3::UbJetty::UbJettyInflightMax",
+     "Jetty inflight control was renamed."},
+    {"ns3::UbCtpTransportService::MaxOutstandingTransactions",
+     "ns3::UbJetty::UbJettyInflightMax",
+     "CTP no longer owns a separate send-admission window; outstanding back-pressure belongs to Jetty."},
 }};
 
 struct NetworkAttributeAlias
@@ -58,6 +67,217 @@ std::string
 DisplayFilename(const std::string& filename)
 {
     return std::filesystem::path(filename).filename().string();
+}
+
+uint64_t
+MixLinkDelayOffsetHash(uint64_t value)
+{
+    value += 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+uint32_t
+ParseUint32Field(const std::string& line, size_t valueStart, size_t valueEnd)
+{
+    uint32_t value = 0;
+    for (size_t pos = valueStart; pos < valueEnd; ++pos)
+    {
+        const char c = line[pos];
+        NS_ABORT_MSG_IF(c < '0' || c > '9',
+                        "Invalid uint32 field in traffic.csv; signed values are not supported");
+        const uint32_t digit = static_cast<uint32_t>(c - '0');
+        NS_ABORT_MSG_IF(value > (std::numeric_limits<uint32_t>::max() - digit) / 10,
+                        "traffic.csv uint32 field overflow");
+        value = value * 10 + digit;
+    }
+    return value;
+}
+
+uint32_t
+ParseUint32Field(std::string_view field)
+{
+    NS_ABORT_MSG_IF(field.empty(), "Missing uint32 field in traffic.csv");
+    uint32_t value = 0;
+    for (char c : field)
+    {
+        NS_ABORT_MSG_IF(c < '0' || c > '9',
+                        "Invalid uint32 field in traffic.csv; signed values are not supported");
+        const uint32_t digit = static_cast<uint32_t>(c - '0');
+        NS_ABORT_MSG_IF(value > (std::numeric_limits<uint32_t>::max() - digit) / 10,
+                        "traffic.csv uint32 field overflow");
+        value = value * 10 + digit;
+    }
+    return value;
+}
+
+uint8_t
+ParseTrafficPriorityField(std::string_view field)
+{
+    const uint32_t priority = ParseUint32Field(field);
+    NS_ABORT_MSG_IF(priority > UB_PRIORITY_MAX,
+                    "Invalid priority field in traffic.csv; valid range is 0.."
+                        << static_cast<uint32_t>(UB_PRIORITY_MAX));
+    return static_cast<uint8_t>(priority);
+}
+
+std::string_view
+TrimField(std::string_view field)
+{
+    while (!field.empty() &&
+           (field.front() == ' ' || field.front() == '\t' || field.front() == '\r' ||
+            field.front() == '\n'))
+    {
+        field.remove_prefix(1);
+    }
+    while (!field.empty() &&
+           (field.back() == ' ' || field.back() == '\t' || field.back() == '\r' ||
+            field.back() == '\n'))
+    {
+        field.remove_suffix(1);
+    }
+    return field;
+}
+
+std::string
+TrimFieldCopy(std::string_view field)
+{
+    field = TrimField(field);
+    return std::string(field.data(), field.size());
+}
+
+std::vector<std::string>
+SplitCsvRow(const std::string& line)
+{
+    std::vector<std::string> fields;
+    std::stringstream ss(line);
+    std::string field;
+    while (std::getline(ss, field, ','))
+    {
+        fields.push_back(TrimFieldCopy(field));
+    }
+    if (!line.empty() && line.back() == ',')
+    {
+        fields.emplace_back();
+    }
+    return fields;
+}
+
+std::map<std::string, std::size_t>
+BuildCsvHeaderIndex(const std::vector<std::string>& header)
+{
+    std::map<std::string, std::size_t> index;
+    for (std::size_t i = 0; i < header.size(); ++i)
+    {
+        index.emplace(header[i], i);
+    }
+    return index;
+}
+
+std::string
+GetRequiredCsvField(const std::vector<std::string>& fields,
+                    const std::map<std::string, std::size_t>& headerIndex,
+                    const std::string& column,
+                    const std::string& filename)
+{
+    const auto it = headerIndex.find(column);
+    NS_ABORT_MSG_IF(it == headerIndex.end(),
+                    DisplayFilename(filename) << " missing required column: " << column);
+    NS_ABORT_MSG_IF(it->second >= fields.size(),
+                    DisplayFilename(filename) << " row missing required field: " << column);
+    return fields[it->second];
+}
+
+std::string
+GetOptionalCsvField(const std::vector<std::string>& fields,
+                    const std::map<std::string, std::size_t>& headerIndex,
+                    const std::string& column)
+{
+    const auto it = headerIndex.find(column);
+    if (it == headerIndex.end() || it->second >= fields.size())
+    {
+        return "";
+    }
+    return fields[it->second];
+}
+
+bool
+IsLegacyNodeForwardDelayHeader(const std::vector<std::string>& header)
+{
+    return header.size() == 4 && header[0] == "nodeId" && header[1] == "nodeType" &&
+           header[2] == "portNum" && header[3] == "forwardDelay";
+}
+
+void
+AppendDependencyPhases(std::string_view field, TrafficRecord& record)
+{
+    while (!field.empty())
+    {
+        while (!field.empty() &&
+               (field.front() == ' ' || field.front() == '\t' || field.front() == '\r'))
+        {
+            field.remove_prefix(1);
+        }
+        if (field.empty())
+        {
+            break;
+        }
+
+        size_t tokenEnd = 0;
+        while (tokenEnd < field.size() && field[tokenEnd] != ' ' && field[tokenEnd] != '\t' &&
+               field[tokenEnd] != '\r')
+        {
+            ++tokenEnd;
+        }
+
+        record.dependOnPhases.push_back(ParseUint32Field(field.substr(0, tokenEnd)));
+        field.remove_prefix(tokenEnd);
+    }
+}
+
+void
+SetTrafficRecordField(int fieldCount, std::string_view rawField, TrafficRecord& record)
+{
+    const std::string_view field = TrimField(rawField);
+    switch (fieldCount)
+    {
+    case 0:
+        record.taskId = static_cast<int>(ParseUint32Field(field));
+        break;
+    case 1:
+        record.sourceNode = static_cast<int>(ParseUint32Field(field));
+        break;
+    case 2:
+        record.destNode = static_cast<int>(ParseUint32Field(field));
+        break;
+    case 3:
+        record.dataSize = static_cast<int>(ParseUint32Field(field));
+        break;
+    case 4:
+        record.opType.assign(field.data(), field.size());
+        break;
+    case 5:
+        record.priority = static_cast<int>(ParseTrafficPriorityField(field));
+        break;
+    case 6:
+        record.delay.assign(field.data(), field.size());
+        break;
+    case 7:
+        record.phaseId = static_cast<int>(ParseUint32Field(field));
+        break;
+    case 8:
+        AppendDependencyPhases(field, record);
+        break;
+    case 9:
+        record.srcEntityId = field.empty() ? 0 : ParseUint32Field(field);
+        record.hasSrcEntityId = true;
+        break;
+    case 10:
+        record.dstEntityId = field.empty() ? 0 : ParseUint32Field(field);
+        record.hasDstEntityId = true;
+        break;
+    }
 }
 
 std::pair<uint32_t, uint32_t>
@@ -263,6 +483,50 @@ CreateConfigStoreInput(const std::string& filename, uint32_t& rewrittenAliasLine
 }
 
 void
+SetTrafficRecordViewField(int fieldCount, std::string_view rawField, TrafficRecordView& record)
+{
+    const std::string_view field = TrimField(rawField);
+    switch (fieldCount)
+    {
+    case 0:
+        record.taskId = ParseUint32Field(field);
+        break;
+    case 1:
+        record.sourceNode = ParseUint32Field(field);
+        break;
+    case 2:
+        record.destNode = ParseUint32Field(field);
+        break;
+    case 3:
+        record.dataSize = ParseUint32Field(field);
+        break;
+    case 4:
+        record.opType = field;
+        break;
+    case 5:
+        record.priority = ParseTrafficPriorityField(field);
+        break;
+    case 6:
+        record.delay = field;
+        break;
+    case 7:
+        record.phaseId = ParseUint32Field(field);
+        break;
+    case 8:
+        record.dependOnPhases = field;
+        break;
+    case 9:
+        record.srcEntityId = field.empty() ? 0 : ParseUint32Field(field);
+        record.hasSrcEntityId = true;
+        break;
+    case 10:
+        record.dstEntityId = field.empty() ? 0 : ParseUint32Field(field);
+        record.hasDstEntityId = true;
+        break;
+    }
+}
+
+void
 ValidateLegacyNetworkAttributeKeys(const std::string& filename)
 {
     std::ifstream file(filename.c_str());
@@ -330,22 +594,11 @@ PreloadLocalTpIfOwned(Ptr<Node> node,
     }
 
     auto congestionCtrl = UbCongestionControl::Create(UB_DEVICE);
-    // ctrl->CreateTp(src, dest, sport, dport, priority, srcTpn, dstTpn, congestionCtrl);
-    Connection conn = {
-        src,
-        sport,
-        srcTpn,
-        dest,
-        dport,
-        dstTpn,
-        priority,
-        0
-    };
-    ctrl->CreateTp(conn, congestionCtrl);
+    ctrl->CreateTp(src, dest, sport, dport, priority, srcTpn, dstTpn, congestionCtrl);
 }
 
 Ptr<UbLink>
-CreateUbChannelBetween(Ptr<UbPort> p1, Ptr<UbPort> p2, const string& delay)
+CreateUbChannelBetween(Ptr<UbPort> p1, Ptr<UbPort> p2, Time delay)
 {
     Ptr<UbLink> channel;
 #ifdef NS3_MPI
@@ -362,7 +615,7 @@ CreateUbChannelBetween(Ptr<UbPort> p1, Ptr<UbPort> p2, const string& delay)
         channel = CreateObject<UbLink>();
     }
 
-    channel->SetAttribute("Delay", StringValue(delay));
+    channel->SetAttribute("Delay", TimeValue(delay));
     p1->Attach(channel);
     p2->Attach(channel);
     return channel;
@@ -818,6 +1071,38 @@ inline void UbUtils::TpLastPacketReceivesNotify(
     PrintTraceInfo(fileName, info);
 }
 
+inline void
+UbUtils::CtpFirstPacketSendsNotify(UbCtpPacketTimingTraceData data)
+{
+    std::ostringstream oss;
+    oss << "First Packet Sends, taskId: " << data.taskId << " transport: CTP"
+        << " srcNode: " << data.srcNodeId << " dstNode: " << data.dstNodeId
+        << " srcEntity: " << data.srcEntityId << " dstEntity: " << data.dstEntityId
+        << " vl: " << data.vl << " taSsn: " << data.taSsn << " outPort: " << data.outPort
+        << " payloadBytes: " << data.payloadBytes << " taOpcode: " << data.opcode << " lastPacket: 0";
+    string info = oss.str();
+    string fileName = trace_path + "runlog/PacketTrace_node_" + to_string(data.nodeId) + ".tr";
+    PrintTraceInfo(fileName, info);
+}
+
+inline void
+UbUtils::CtpLastPacketACKsNotify(UbCtpPacketTimingTraceData data)
+{
+    std::ostringstream oss;
+    oss << "Last Packet ACKs, taskId: " << data.taskId << " transport: CTP"
+        << " srcNode: " << data.srcNodeId << " dstNode: " << data.dstNodeId
+        << " srcEntity: " << data.srcEntityId << " dstEntity: " << data.dstEntityId
+        << " vl: " << data.vl << " taSsn: " << data.taSsn;
+    if (data.outPort != UINT32_MAX)
+    {
+        oss << " outPort: " << data.outPort;
+    }
+    oss << " payloadBytes: " << data.payloadBytes << " taOpcode: " << data.opcode << " lastPacket: 1";
+    string info = oss.str();
+    string fileName = trace_path + "runlog/PacketTrace_node_" + to_string(data.nodeId) + ".tr";
+    PrintTraceInfo(fileName, info);
+}
+
 inline void UbUtils::TpWqeSegmentSendsNotify(uint32_t nodeId, uint32_t taskId, uint32_t taSsn)
 {
     std::ostringstream oss;
@@ -850,9 +1135,6 @@ inline string UbUtils::Among(string s, string ts)
     return res;
 }
 
-// void UbUtils::TpRecvNotify(uint32_t packetUid, uint32_t psn, uint32_t src, uint32_t dst, uint32_t srcTpn,
-//                            uint32_t dstTpn, PacketType type, uint32_t size, uint32_t taskId,
-//                            std::string ackInfo, UbPacketTraceTag traceTag)
 void UbUtils::TpRecvNotify(UbTpRecvTraceData data)
 {
     const char* pktType = "CONTROL";
@@ -1396,6 +1678,23 @@ inline void UbUtils::QueueVoqNotify(uint32_t nodeId, uint32_t portId, uint64_t v
     PrintTraceInfo(fileName, info);
 }
 
+inline void
+UbUtils::QueueIngressOccupancyNotify(uint32_t nodeId,
+                                     uint32_t inPort,
+                                     uint32_t priority,
+                                     uint64_t bytes)
+{
+    std::ostringstream oss;
+    oss << "Queue Update, source: ingress"
+        << " inPort: " << inPort
+        << " priority: " << priority
+        << " bytes: " << bytes;
+    string info = oss.str();
+    string fileName =
+        trace_path + "runlog/QueueTrace_node_" + to_string(nodeId) + "_port_" + to_string(inPort) + ".tr";
+    PrintTraceInfo(fileName, info);
+}
+
 inline void UbUtils::QueueEgressEnqueueNotify(uint32_t nodeId,
                                               uint32_t portId,
                                               Ptr<const Packet> packet,
@@ -1495,9 +1794,56 @@ inline void UbUtils::SwitchLastPacketTraversesNotify(uint32_t nodeId, UbTranspor
     }
 }
 
-// 读取拓扑文件
-void UbUtils::CreateTopo(const string &filename)
+Time
+UbUtils::ResolveLinkDelayWithOffset(Time baseDelay,
+                                    Time offsetWindow,
+                                    uint32_t offsetSeed,
+                                    uint32_t node1,
+                                    uint32_t port1,
+                                    uint32_t node2,
+                                    uint32_t port2)
 {
+    NS_ABORT_MSG_IF(baseDelay.IsStrictlyNegative(), "link delay must be non-negative");
+    NS_ABORT_MSG_IF(offsetWindow.IsStrictlyNegative(),
+                    "link delay offset window must be non-negative");
+    if (baseDelay.IsZero() || offsetWindow.IsZero())
+    {
+        return baseDelay;
+    }
+
+    std::pair<uint32_t, uint32_t> endpoint1{node1, port1};
+    std::pair<uint32_t, uint32_t> endpoint2{node2, port2};
+    if (endpoint2 < endpoint1)
+    {
+        std::swap(endpoint1, endpoint2);
+    }
+
+    uint64_t hash =
+        MixLinkDelayOffsetHash(static_cast<uint64_t>(offsetSeed) ^ 0x6c696e6b2d646c79ULL);
+    hash = MixLinkDelayOffsetHash(hash ^ endpoint1.first);
+    hash = MixLinkDelayOffsetHash(hash ^ endpoint1.second);
+    hash = MixLinkDelayOffsetHash(hash ^ endpoint2.first);
+    hash = MixLinkDelayOffsetHash(hash ^ endpoint2.second);
+
+    const auto slotCount = static_cast<uint64_t>(offsetWindow.GetTimeStep());
+    return baseDelay + TimeStep(static_cast<int64_t>(hash % slotCount));
+}
+
+// 读取拓扑文件
+void
+UbUtils::CreateTopo(const string& filename)
+{
+    (void)CreateTopo(filename, Time(0), 1);
+}
+
+UbUtils::LinkDelayOffsetStats
+UbUtils::CreateTopo(const string& filename, Time offsetWindow, uint32_t offsetSeed)
+{
+    NS_ABORT_MSG_IF(offsetWindow.IsStrictlyNegative(),
+                    "link delay offset window must be non-negative");
+    LinkDelayOffsetStats offsetStats;
+    std::unordered_map<int64_t, uint64_t> slotOccupancy;
+
     PrintTimestamp("[setup] Load " + DisplayFilename(filename));
     ifstream file(filename);
     if (!file.is_open())
@@ -1520,17 +1866,17 @@ void UbUtils::CreateTopo(const string &filename)
         string delay;
         string bandwidth;
         getline(ss, cell, ',');
-        node1 = static_cast<uint32_t>(stoi(cell));
+        node1 = static_cast<uint32_t>(stoi(TrimFieldCopy(cell)));
         getline(ss, cell, ',');
-        port1 = static_cast<uint32_t>(stoi(cell));
+        port1 = static_cast<uint32_t>(stoi(TrimFieldCopy(cell)));
         getline(ss, cell, ',');
-        node2 = static_cast<uint32_t>(stoi(cell));
+        node2 = static_cast<uint32_t>(stoi(TrimFieldCopy(cell)));
         getline(ss, cell, ',');
-        port2 = static_cast<uint32_t>(stoi(cell));
+        port2 = static_cast<uint32_t>(stoi(TrimFieldCopy(cell)));
         getline(ss, cell, ',');
-        bandwidth = cell;
+        bandwidth = TrimFieldCopy(cell);
         getline(ss, cell, ',');
-        delay = cell;
+        delay = TrimFieldCopy(cell);
         Ptr<Node> n1 = NodeList::GetNode(node1);
         Ptr<Node> n2 = NodeList::GetNode(node2);
 
@@ -1538,7 +1884,29 @@ void UbUtils::CreateTopo(const string &filename)
         Ptr<UbPort> p2 = DynamicCast<UbPort>(n2->GetDevice(port2));
         p1->SetDataRate(DataRate(bandwidth));
         p2->SetDataRate(DataRate(bandwidth));
-        CreateUbChannelBetween(p1, p2, delay);
+        const Time baseDelay(delay);
+        const Time effectiveDelay = ResolveLinkDelayWithOffset(baseDelay,
+                                                               offsetWindow,
+                                                               offsetSeed,
+                                                               node1,
+                                                               port1,
+                                                               node2,
+                                                               port2);
+        if (baseDelay.IsZero())
+        {
+            ++offsetStats.zeroDelayLinkCount;
+        }
+        else
+        {
+            ++offsetStats.positiveLinkCount;
+            if (offsetWindow.IsStrictlyPositive())
+            {
+                const int64_t slot = (effectiveDelay - baseDelay).GetTimeStep();
+                offsetStats.maxLinksPerOffset =
+                    std::max(offsetStats.maxLinksPerOffset, ++slotOccupancy[slot]);
+            }
+        }
+        CreateUbChannelBetween(p1, p2, effectiveDelay);
     }
 
     for (auto it = NodeList::Begin(); it != NodeList::End(); ++it) {
@@ -1550,6 +1918,14 @@ void UbUtils::CreateTopo(const string &filename)
         }
     }
     file.close();
+
+    if (offsetWindow.IsStrictlyPositive())
+    {
+        offsetStats.distinctOffsetCount = slotOccupancy.size();
+        offsetStats.offsetReuseCount =
+            offsetStats.positiveLinkCount - offsetStats.distinctOffsetCount;
+    }
+    return offsetStats;
 }
 
 // 解析节点范围（如 "1..4"）
@@ -1579,35 +1955,35 @@ void UbUtils::CreateNode(const string &filename)
         NS_ASSERT_MSG(0, "Can not open File: " << filename);
     }
     string line;
-    // 跳过标题行
-    getline(file, line);
+    NS_ABORT_MSG_IF(!getline(file, line), "node.csv must include a header");
+    const std::vector<std::string> header = SplitCsvRow(line);
+    const std::map<std::string, std::size_t> headerIndex = BuildCsvHeaderIndex(header);
+    const bool legacyForwardDelayIsAllocationDelay = IsLegacyNodeForwardDelayHeader(header);
     while (getline(file, line)) {
         // 跳过空行、#开头行、纯空格行
         if (line.empty() || line[0] == '#' || line.find_first_not_of(" \t") == string::npos) {
             continue;
         }
-        stringstream ss(line);
-        string nodeIdStr;
-        string nodeTypeStr;
-        string portNumStr;
-        string forwardDelay;
-        string systemIdStr;
-        // 解析CSV行
-        getline(ss, nodeIdStr, ',');
-        getline(ss, nodeTypeStr, ',');
-        getline(ss, portNumStr, ',');
-        getline(ss, forwardDelay, ',');
-        getline(ss, systemIdStr);
+        const std::vector<std::string> fields = SplitCsvRow(line);
 
         NodeEle nodeEle = {};
-        nodeEle.nodeIdStr = nodeIdStr;
-        nodeEle.nodeTypeStr = nodeTypeStr;
-        nodeEle.portNumStr = portNumStr;
-        nodeEle.forwardDelay = forwardDelay;
-        nodeEle.systemIdStr = systemIdStr;
+        nodeEle.nodeIdStr = GetRequiredCsvField(fields, headerIndex, "nodeId", filename);
+        nodeEle.nodeTypeStr = GetRequiredCsvField(fields, headerIndex, "nodeType", filename);
+        nodeEle.portNumStr = GetRequiredCsvField(fields, headerIndex, "portNum", filename);
+        if (legacyForwardDelayIsAllocationDelay)
+        {
+            nodeEle.forwardDelay = "";
+            nodeEle.allocationDelay = GetOptionalCsvField(fields, headerIndex, "forwardDelay");
+        }
+        else
+        {
+            nodeEle.forwardDelay = GetOptionalCsvField(fields, headerIndex, "forwardDelay");
+            nodeEle.allocationDelay = GetOptionalCsvField(fields, headerIndex, "allocationDelay");
+        }
+        nodeEle.systemIdStr = GetOptionalCsvField(fields, headerIndex, "systemId");
 
         // 解析节点ID（范围 or 单个节点）
-        ParseNodeRange(nodeIdStr, nodeEle);
+        ParseNodeRange(nodeEle.nodeIdStr, nodeEle);
     }
     file.close();
     // 创建节点
@@ -1616,6 +1992,7 @@ void UbUtils::CreateNode(const string &filename)
         string nodeTypeStr = it.second.nodeTypeStr;
         string portNumStr = it.second.portNumStr;
         string forwardDelay = it.second.forwardDelay;
+        string allocationDelay = it.second.allocationDelay;
         string systemIdStr = it.second.systemIdStr;
         int portNum = stoi(portNumStr);
         uint32_t systemId = systemIdStr.empty() ? 0 : static_cast<uint32_t>(stoul(systemIdStr));
@@ -1645,8 +2022,11 @@ void UbUtils::CreateNode(const string &filename)
         auto cc = UbCongestionControl::Create(UB_SWITCH);
         cc->OnSwitchAttached(sw);
         if (!forwardDelay.empty()) {
+            sw->SetAttribute("InPortProcessingDelay", StringValue(forwardDelay));
+        }
+        if (!allocationDelay.empty()) {
             auto allocator = sw->GetAllocator();
-            allocator->SetAttribute("AllocationTime", StringValue(forwardDelay));
+            allocator->SetAttribute("AllocationTime", StringValue(allocationDelay));
         }
     }
 }
@@ -1822,7 +2202,8 @@ void UbUtils::CreateTp(const string &filename)
     ifstream file(filename);
     if (!file.is_open()) { // 没有TP文件则使用实时创建TP模式
         PrintTimestamp("[setup] Skip " + DisplayFilename(filename) +
-                       " (not found; TP channels will be created on demand).");
+                       " (not found; traffic will reserve TP connections before endpoints "
+                       "materialize on demand).");
         return ;
     }
     PrintTimestamp("[setup] Load " + DisplayFilename(filename));
@@ -1884,7 +2265,7 @@ void UbUtils::SetRecord(int fieldCount, string field, TrafficRecord &record)
             record.opType = field;
             break;
         case FIELDCOUNT::PRIORITY:
-            record.priority = stoi(field);
+            record.priority = static_cast<int>(ParseTrafficPriorityField(field));
             break;
         case FIELDCOUNT::DELAY:
             record.delay = field;
@@ -1908,34 +2289,221 @@ void UbUtils::SetRecord(int fieldCount, string field, TrafficRecord &record)
 vector<TrafficRecord> UbUtils::LoadTrafficConfig(const string &filename)
 {
     vector<TrafficRecord> records;
-    PrintTimestamp("[traffic] Load " + DisplayFilename(filename));
+    ForEachTrafficRecordInternal(filename, "Load", [&](const TrafficRecord& record) {
+        UbTrafficGen::Get()->SetPhaseDepend(record.phaseId, record.taskId);
+        records.push_back(record);
+    });
+    return records;
+}
+
+void
+UbUtils::ForEachTrafficRecord(const string& filename,
+                              const std::function<void(const TrafficRecord&)>& callback)
+{
+    ForEachTrafficRecordInternal(filename, "Load", callback);
+}
+
+void
+UbUtils::ForEachTrafficRecordView(const string& filename,
+                                  const std::function<void(const TrafficRecordView&)>& callback)
+{
+    ForEachTrafficRecordViewInternal(filename, "Load", callback);
+}
+
+void
+UbUtils::RegisterTrafficPhaseDependencies(const string& filename)
+{
+    (void)RegisterTrafficPhaseDependenciesAndGetStats(filename);
+}
+
+UbUtils::TrafficLoadStats
+UbUtils::RegisterTrafficPhaseDependenciesAndGetStats(const string& filename)
+{
+    TrafficLoadStats stats;
+    ForEachTrafficPhaseIndexRecord(filename, [&](uint32_t taskId, uint32_t phaseId) {
+        UbTrafficGen::Get()->RegisterPhaseTaskDuringInitialLoad(phaseId);
+        ++stats.recordCount;
+        stats.maxTaskId = std::max<uint32_t>(stats.maxTaskId, taskId);
+    });
+    return stats;
+}
+
+void
+UbUtils::ForEachTrafficPhaseIndexRecord(const string& filename,
+                                        const std::function<void(uint32_t, uint32_t)>& callback)
+{
+    PrintTimestamp("[traffic] Index phase dependencies from " + DisplayFilename(filename));
     ifstream file(filename);
     if (!file.is_open()) {
         NS_ASSERT_MSG(0, "Can not open File: " << filename);
-        return records;
+        return;
+    }
+
+    string line;
+    getline(file, line);
+    while (getline(file, line)) {
+        if (line.empty() || line[0] == '#' || line.find_first_not_of(" \t") == string::npos) {
+            continue;
+        }
+
+        uint32_t taskId = 0;
+        uint32_t phaseId = 0;
+        int fieldCount = 0;
+        size_t fieldStart = 0;
+        bool hasTaskId = false;
+        bool hasPhaseId = false;
+
+        while (fieldStart <= line.size()) {
+            size_t fieldEnd = line.find(',', fieldStart);
+            if (fieldEnd == string::npos) {
+                fieldEnd = line.size();
+            }
+
+            if (fieldCount == static_cast<int>(FIELDCOUNT::TASKID) ||
+                fieldCount == static_cast<int>(FIELDCOUNT::PHASEID)) {
+                size_t valueStart = fieldStart;
+                while (valueStart < fieldEnd &&
+                       (line[valueStart] == ' ' || line[valueStart] == '\t')) {
+                    ++valueStart;
+                }
+                size_t valueEnd = fieldEnd;
+                while (valueEnd > valueStart &&
+                       (line[valueEnd - 1] == ' ' || line[valueEnd - 1] == '\t')) {
+                    --valueEnd;
+                }
+                if (valueStart < valueEnd) {
+                    const uint32_t value = ParseUint32Field(line, valueStart, valueEnd);
+                    if (fieldCount == static_cast<int>(FIELDCOUNT::TASKID)) {
+                        taskId = value;
+                        hasTaskId = true;
+                    } else {
+                        phaseId = value;
+                        hasPhaseId = true;
+                    }
+                }
+            }
+
+            if (hasTaskId && hasPhaseId) {
+                break;
+            }
+            if (fieldEnd == line.size()) {
+                break;
+            }
+            fieldStart = fieldEnd + 1;
+            ++fieldCount;
+        }
+
+        if (hasTaskId && hasPhaseId) {
+            callback(taskId, phaseId);
+        }
+    }
+}
+
+void
+UbUtils::ForEachTrafficRecordInternal(const string& filename,
+                                      const string& action,
+                                      const std::function<void(const TrafficRecord&)>& callback)
+{
+    PrintTimestamp("[traffic] " + action + " " + DisplayFilename(filename));
+    ifstream file(filename);
+    if (!file.is_open()) {
+        NS_ASSERT_MSG(0, "Can not open File: " << filename);
+        return;
+    }
+    string line;
+    getline(file, line);  // 跳过标题行
+    TrafficRecord record;
+    while (getline(file, line)) {
+        if (line.empty() || line[0] == '#' || line.find_first_not_of(" \t") == string::npos) {
+            continue;
+        }
+
+        record.taskId = 0;
+        record.sourceNode = 0;
+        record.destNode = 0;
+        record.dataSize = 0;
+        record.opType.clear();
+        record.priority = 0;
+        record.delay.clear();
+        record.phaseId = 0;
+        record.dependOnPhases.clear();
+        record.srcEntityId = 0;
+        record.dstEntityId = 0;
+        record.hasSrcEntityId = false;
+        record.hasDstEntityId = false;
+
+        int fieldCount = 0;
+        size_t fieldStart = 0;
+        while (fieldStart <= line.size()) {
+            size_t fieldEnd = line.find(',', fieldStart);
+            if (fieldEnd == string::npos) {
+                fieldEnd = line.size();
+            }
+
+            SetTrafficRecordField(fieldCount,
+                                  std::string_view(line).substr(fieldStart,
+                                                                fieldEnd - fieldStart),
+                                  record);
+            ++fieldCount;
+
+            if (fieldEnd == line.size()) {
+                break;
+            }
+            fieldStart = fieldEnd + 1;
+        }
+        NS_ABORT_MSG_IF(
+            fieldCount != 9 && fieldCount != 11,
+            "traffic.csv row must have 9 base fields or 11 fields with srcEntityId,dstEntityId");
+        callback(record);
+    }
+    file.close();
+}
+
+void
+UbUtils::ForEachTrafficRecordViewInternal(
+    const string& filename,
+    const string& action,
+    const std::function<void(const TrafficRecordView&)>& callback)
+{
+    PrintTimestamp("[traffic] " + action + " " + DisplayFilename(filename));
+    ifstream file(filename);
+    if (!file.is_open()) {
+        NS_ASSERT_MSG(0, "Can not open File: " << filename);
+        return;
     }
     string line;
     getline(file, line);  // 跳过标题行
     while (getline(file, line)) {
-        stringstream ss(line);
         if (line.empty() || line[0] == '#' || line.find_first_not_of(" \t") == string::npos) {
             continue;
         }
-        string field;
-        TrafficRecord record;
+
+        TrafficRecordView record;
         int fieldCount = 0;
-        while (getline(ss, field, ',')) {
-            // 去除字段前后的空格
-            field.erase(0, field.find_first_not_of(" \t"));
-            field.erase(field.find_last_not_of(" \t") + 1);
-            SetRecord(fieldCount, field, record);
-            fieldCount++;
+        size_t fieldStart = 0;
+        while (fieldStart <= line.size()) {
+            size_t fieldEnd = line.find(',', fieldStart);
+            if (fieldEnd == string::npos) {
+                fieldEnd = line.size();
+            }
+
+            SetTrafficRecordViewField(fieldCount,
+                                      std::string_view(line).substr(fieldStart,
+                                                                    fieldEnd - fieldStart),
+                                      record);
+            ++fieldCount;
+
+            if (fieldEnd == line.size()) {
+                break;
+            }
+            fieldStart = fieldEnd + 1;
         }
-        UbTrafficGen::Get()->SetPhaseDepend(record.phaseId, record.taskId);
-        records.push_back(record);
+        NS_ABORT_MSG_IF(
+            fieldCount != 9 && fieldCount != 11,
+            "traffic.csv row must have 9 base fields or 11 fields with srcEntityId,dstEntityId");
+        callback(record);
     }
     file.close();
-    return records;
 }
 
 // 从TXT文件加载配置
@@ -2071,6 +2639,27 @@ void UbUtils::TopoTraceConnect()
                 auto ldstApi = ubCtrl->GetUbFunction()->GetUbLdstApi();
                 ldstApi->TraceConnectWithoutContext("LdstRecvNotify", MakeCallback(LdstRecvNotify));
             }
+            if (PacketTraceEnable) {
+                ubCtrl->SetCtpPacketTimingTraceCallbacks(MakeCallback(CtpFirstPacketSendsNotify),
+                                                         MakeCallback(CtpLastPacketACKsNotify));
+            }
+        }
+
+        if (queueTraceEnabled) {
+            uint32_t DevicesNum = node->GetNDevices();
+            for (uint32_t i = 0; i < DevicesNum; i++) {
+                Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(i));
+                if (port) {
+                    port->GetUbQueue()->TraceConnectWithoutContext(
+                        "UbEnqueue",
+                        MakeBoundCallback(&UbUtils::QueueEgressEnqueueNotify, node->GetId(), i));
+                    port->GetUbQueue()->TraceConnectWithoutContext(
+                        "UbDequeue",
+                        MakeBoundCallback(&UbUtils::QueueEgressDequeueNotify, node->GetId(), i));
+                } else {
+                    NS_ASSERT_MSG(0, "port is null");
+                }
+            }
         }
 
         if (PortTraceEnable) {
@@ -2080,14 +2669,6 @@ void UbUtils::TopoTraceConnect()
                 if (port) {
                     port->TraceConnectWithoutContext("PortTxNotify", MakeCallback(PortTxNotify));
                     port->TraceConnectWithoutContext("PortRxNotify", MakeCallback(PortRxNotify));
-                    if (queueTraceEnabled) {
-                        port->GetUbQueue()->TraceConnectWithoutContext(
-                            "UbEnqueue",
-                            MakeBoundCallback(&UbUtils::QueueEgressEnqueueNotify, node->GetId(), i));
-                        port->GetUbQueue()->TraceConnectWithoutContext(
-                            "UbDequeue",
-                            MakeBoundCallback(&UbUtils::QueueEgressDequeueNotify, node->GetId(), i));
-                    }
                 } else {
                     NS_ASSERT_MSG(0, "port is null");
                 }
@@ -2098,6 +2679,9 @@ void UbUtils::TopoTraceConnect()
             sw->GetQueueManager()->TraceConnectWithoutContext(
                 "OutPortBufferBytes",
                 MakeBoundCallback(&UbUtils::QueueVoqNotify, node->GetId()));
+            sw->GetQueueManager()->TraceConnectWithoutContext(
+                "IngressQueueOccupancyBytes",
+                MakeBoundCallback(&UbUtils::QueueIngressOccupancyNotify, node->GetId()));
         }
     }
 
@@ -2160,6 +2744,7 @@ bool UbUtils::QueryAttributeInfo(int argc, char *argv[])
     std::string className;
     std::string attrName;
     std::string globalName;
+    std::string ignoredCasePath;
     bool printUbGlobals = false;
 
     CommandLine cmd;
@@ -2167,6 +2752,8 @@ bool UbUtils::QueryAttributeInfo(int argc, char *argv[])
     cmd.AddValue("AttributeName", "Target attribute name (optional)", attrName);
     cmd.AddValue("GlobalName", "Target Unified Bus global value name (optional)", globalName);
     cmd.AddValue("PrintUbGlobals", "Print Unified Bus global values with type metadata", printUbGlobals);
+    cmd.AddValue("case-path", "Ignored case path for metadata-only queries", ignoredCasePath);
+    cmd.AddNonOption("casePath", "Ignored case path for metadata-only queries", ignoredCasePath);
     cmd.Parse(argc, argv);
 
     auto isUbGlobal = [](const std::string& name) {
@@ -2175,10 +2762,10 @@ bool UbUtils::QueryAttributeInfo(int argc, char *argv[])
     auto renderGlobalInfo = [](const GlobalValue& globalValue) {
         StringValue value;
         globalValue.GetValue(value);
-        NS_LOG_UNCOND("Global: " << globalValue.GetName() << "\n"
-                                 << "Description: " << globalValue.GetHelp() << "\n"
-                                 << "DataType: " << globalValue.GetChecker()->GetValueTypeName() << "\n"
-                                 << "Default: " << value.Get());
+        std::cout << "Global: " << globalValue.GetName() << '\n'
+                  << "Description: " << globalValue.GetHelp() << '\n'
+                  << "DataType: " << globalValue.GetChecker()->GetValueTypeName() << '\n'
+                  << "Default: " << value.Get() << std::endl;
     };
 
     if (!globalName.empty()) {
@@ -2188,7 +2775,7 @@ bool UbUtils::QueryAttributeInfo(int argc, char *argv[])
                 return true;
             }
         }
-        NS_LOG_UNCOND("Global not found!");
+        std::cout << "Global not found!" << std::endl;
         return true;
     }
 
@@ -2221,21 +2808,22 @@ bool UbUtils::QueryAttributeInfo(int argc, char *argv[])
     if (!attrName.empty()) {  // attrName not empty
         struct TypeId::AttributeInformation info;
         if (tid.LookupAttributeByName(attrName, &info)) {  // 输出单个属性值
-            NS_LOG_UNCOND("Attribute: " << info.name << "\n"
-                                        << "Description: " << info.help << "\n"
-                                        << "DataType: " << info.checker->GetValueTypeName() << "\n"
-                                        << "Default: " << info.initialValue->SerializeToString(info.checker));
+            std::cout << "Attribute: " << info.name << '\n'
+                      << "Description: " << info.help << '\n'
+                      << "DataType: " << info.checker->GetValueTypeName() << '\n'
+                      << "Default: " << info.initialValue->SerializeToString(info.checker)
+                      << std::endl;
         } else {
-            NS_LOG_UNCOND("Attribute not found!");
+            std::cout << "Attribute not found!" << std::endl;
         }
     } else {  // 输出所有属性
         for (uint32_t i = 0; i < tid.GetAttributeN(); ++i) {
             TypeId::AttributeInformation info = tid.GetAttribute(i);
-            NS_LOG_UNCOND(
-                "Attribute: " << info.name << "\n"
-                              << "Description: " << info.help << "\n"
-                              << "DataType: " << info.checker->GetValueTypeName() << "\n"
-                              << "Default: " << info.initialValue->SerializeToString(info.checker));  // 输出属性信息
+            std::cout << "Attribute: " << info.name << '\n'
+                      << "Description: " << info.help << '\n'
+                      << "DataType: " << info.checker->GetValueTypeName() << '\n'
+                      << "Default: " << info.initialValue->SerializeToString(info.checker)
+                      << std::endl;
         }
     }
     return true;  // 执行完后退出程序

@@ -130,7 +130,7 @@ BuildRetransFaultFilename(const string& faultFilename)
 }
 
 RetransFaultPacketType
-DecodeRetransFaultPacketType(uint8_t opcode)
+DecodeRetransFaultPacketType(uint8_t opcode, uint8_t rspSt)
 {
     if (opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_RELIABLE_TA) ||
         opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_UNRELIABLE_TA)) {
@@ -138,10 +138,7 @@ DecodeRetransFaultPacketType(uint8_t opcode)
     }
     if (opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_ACK_WITHOUT_CETPH) ||
         opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_ACK_WITH_CETPH)) {
-        return RetransFaultPacketType::TPACK;
-    }
-    if (opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_NAK_WITHOUT_CETPH)) {
-        return RetransFaultPacketType::TPNAK;
+        return rspSt == 3 ? RetransFaultPacketType::TPNAK : RetransFaultPacketType::TPACK;
     }
     if (opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_SACK_WITHOUT_CETPH) ||
         opcode == static_cast<uint8_t>(TpOpcode::TP_OPCODE_SACK_WITH_CETPH)) {
@@ -562,7 +559,8 @@ UbFault::TryGetRetransFaultPacketInfo(Ptr<Packet> packet,
     }
     copy->PeekHeader(transportHeader);
 
-    RetransFaultPacketType packetType = DecodeRetransFaultPacketType(transportHeader.GetTPOpcode());
+    RetransFaultPacketType packetType = DecodeRetransFaultPacketType(
+        transportHeader.GetTPOpcode(), transportHeader.GetRspSt());
     if (packetType == RetransFaultPacketType::ANY) {
         return false;
     }

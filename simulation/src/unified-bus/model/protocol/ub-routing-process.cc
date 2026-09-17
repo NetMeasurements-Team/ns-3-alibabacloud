@@ -30,7 +30,8 @@ TypeId UbRoutingProcess::GetTypeId(void)
         .AddAttribute("RoutingAlgorithm",
                     "Routing algorithm applied by UbRoutingProcess.",
                     EnumValue(UbRoutingAlgorithm::HASH),
-                    MakeEnumAccessor(&UbRoutingProcess::m_routingAlgorithm),
+                    MakeEnumAccessor(
+                                    &UbRoutingProcess::m_routingAlgorithm),
                     MakeEnumChecker(UbRoutingAlgorithm::HASH, "HASH",
                                     UbRoutingAlgorithm::ADAPTIVE, "ADAPTIVE"));
     return tid;
@@ -412,6 +413,7 @@ int UbRoutingProcess::SelectOutPort(RoutingKey &rtKey, const std::vector<uint16_
     uint16_t dport = rtKey.dport;
     uint8_t priority = rtKey.priority;
     bool usePacketSpray = rtKey.usePacketSpray;
+    bool hashIncludesTransportPorts = rtKey.hashIncludesTransportPorts;
     // hash key用本地ip做盐值，使同一条流/包在不同交换机上会有不同的hash
     uint32_t salt = utils::NodeIdToIp(m_nodeId).Get();
 
@@ -426,10 +428,12 @@ int UbRoutingProcess::SelectOutPort(RoutingKey &rtKey, const std::vector<uint16_
         // Packet spray should stay exactly even over time for each flow while still
         // randomizing the starting port across different flows.
         const uint64_t flowBase = CalcHash(sip, dip, 0, dport, priority, salt);
-        hash64 = flowBase + sport;
+        const uint64_t packetSalt = CalcHash(0, 0, sport, 0, 0, salt);
+        hash64 = flowBase + packetSalt;
     } else {
         // usePacketSpray == LB_MODE_PER_FLOW
-        hash64 = CalcHash(sip, dip, 0, 0, priority, salt);
+        hash64 = hashIncludesTransportPorts ? CalcHash(sip, dip, sport, dport, priority, salt)
+                                             : CalcHash(sip, dip, 0, 0, priority, salt);
     }
     
     size_t idx = hash64 % totalSize;

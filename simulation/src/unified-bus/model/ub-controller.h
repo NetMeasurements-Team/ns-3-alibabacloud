@@ -7,9 +7,11 @@
 #include <map>
 #include <unordered_map>
 #include "ub-datatype.h"
+#include "ns3/callback.h"
 #include "ns3/ub-switch-allocator.h"
 #include "ns3/ub-function.h"
 #include "ns3/ub-datalink.h"
+#include "ns3/ub-ctp.h"
 #include "ns3/ub-tp-connection-manager.h"
 
 
@@ -44,9 +46,8 @@ public:
      * @param tpn Transport identifier
      * @return Pointer to created transport channel
      */
-    // bool CreateTp(uint32_t src, uint32_t dest, uint8_t sport, uint8_t dport, UbPriority priority,
-    //               uint32_t srcTpn, uint32_t dstTpn, Ptr<UbCongestionControl> congestionCtrl);
-    bool CreateTp(const Connection& conn, Ptr<UbCongestionControl> congestionCtrl);
+    bool CreateTp(uint32_t src, uint32_t dest, uint8_t sport, uint8_t dport, UbPriority priority,
+                  uint32_t srcTpn, uint32_t dstTpn, Ptr<UbCongestionControl> congestionCtrl);
 
     /**
      * @brief Get tp by tpn
@@ -125,6 +126,12 @@ public:
 
     Ptr<UbTransaction> GetUbTransaction();
 
+    Ptr<UbCtpTransportService> GetCtpTransportService();
+    Ptr<UbCtpTransportService> PeekCtpTransportService() const;
+    using CtpPacketTimingCallback = Callback<void, UbCtpPacketTimingTraceData>;
+    void SetCtpPacketTimingTraceCallbacks(CtpPacketTimingCallback firstPacketSendsCallback,
+                                          CtpPacketTimingCallback lastPacketAcksCallback);
+
     /**
      * @brief 1.每个controller创建一个Function
      */
@@ -147,7 +154,25 @@ public:
      */
     Ptr<UbTransportChannel> GetTpByTpn(uint32_t tpn);
 
+    /**
+     * @brief Create a local TP endpoint from a reserved local TPN.
+     * @param tpn Local transport number.
+     * @return Pointer to the local TP endpoint, or nullptr if the TPN is not reserved locally.
+     */
+    Ptr<UbTransportChannel> CreateReservedTpEndpoint(uint32_t tpn);
+
+    /**
+     * @brief Resolve an inbound TP only when the packet matches its local channel key.
+     * @return The existing or newly materialized local endpoint, or nullptr on mismatch.
+     */
+    Ptr<UbTransportChannel> ResolveInboundTp(uint32_t srcTpn,
+                                             uint32_t dstTpn,
+                                             Ipv4Address sourceIp,
+                                             Ipv4Address destinationIp,
+                                             UbPriority priority);
+
     std::map<uint32_t, Ptr<UbTransportChannel>> GetTpnMap() const;
+    uint32_t GetTransportCountForTest() const { return m_numToTp.size(); }
 
     void SetTpConnManager(Ptr<TpConnectionManager> conn)
     {
@@ -170,26 +195,34 @@ public:
         }
     }
 private:
-    Ptr<UbFunction> m_function; // 功能层
-    Ptr<UbTransaction> m_transaction; // 事务层
-    // Resource storage
-    std::map<uint32_t, Ptr<UbTransportChannel>> m_numToTp{};   // 协议规定TPH中的TP number，在生成TP时，赋值为m_transports_count
-    uint32_t m_transportsCount{0}; // increment only，用于标识tpn
-    std::map<TpgTag, Ptr<UbTransportGroup>> m_tpGroups{};
-    std::map<uint64_t, Ptr<UbPort>> m_ports{};
-    Ptr<UbDataLink> m_datalink = nullptr;
+  Ptr<UbTransportChannel> CreateReservedTpEndpointLocked(uint32_t tpn);
 
-    std::unordered_map<uint32_t, std::vector<Ptr<UbPort>>> m_destinationToPortsMap{};
-    std::unordered_map<uint32_t, std::vector<std::pair<uint8_t, uint8_t>>> m_destinationToPortPairMap{};
-    // src:0 dst:1
-    // ub-config 0->1: p0-p0 p1-p1
-    std::map<std::vector<std::pair<uint8_t, uint8_t>>, uint8_t> m_portPairsToIter{};
-    std::vector<std::vector<std::vector<uint32_t>>> m_dstPriToTp{}; // level_0 dst_node, level_1 priority, level_2 tpns
-    std::vector<std::vector<uint8_t>> m_dstPriToTpRrIndex{}; // level_0 dst_node, level_1 priority, level_2 iteration
+  Ptr<UbFunction> m_function;       // 功能层
+  Ptr<UbTransaction> m_transaction; // 事务层
+  Ptr<UbCtpTransportService> m_ctpTransportService;
+  CtpPacketTimingCallback m_ctpFirstPacketSendsCallback;
+  CtpPacketTimingCallback m_ctpLastPacketAcksCallback;
+  // Resource storage
+  std::map<uint32_t, Ptr<UbTransportChannel>>
+      m_numToTp{}; // 协议规定TPH中的TP number，在生成TP时，赋值为m_transports_count
+  uint32_t m_transportsCount{0}; // increment only，用于标识tpn
+  std::map<TpgTag, Ptr<UbTransportGroup>> m_tpGroups{};
+  std::map<uint64_t, Ptr<UbPort>> m_ports{};
+  Ptr<UbDataLink> m_datalink = nullptr;
 
-    Ptr<TpConnectionManager> m_tpnConn; // 当前节点维护的tpnConn
-    uint32_t m_activeSenderFlowCount{0};
+  std::unordered_map<uint32_t, std::vector<Ptr<UbPort>>> m_destinationToPortsMap{};
+  std::unordered_map<uint32_t, std::vector<std::pair<uint8_t, uint8_t>>>
+      m_destinationToPortPairMap{};
+  // src:0 dst:1
+  // ub-config 0->1: p0-p0 p1-p1
+  std::map<std::vector<std::pair<uint8_t, uint8_t>>, uint8_t> m_portPairsToIter{};
+  std::vector<std::vector<std::vector<uint32_t>>>
+      m_dstPriToTp{}; // level_0 dst_node, level_1 priority, level_2 tpns
+  std::vector<std::vector<uint8_t>>
+      m_dstPriToTpRrIndex{}; // level_0 dst_node, level_1 priority, level_2 iteration
 
+  Ptr<TpConnectionManager> m_tpnConn; // 当前节点维护的tpnConn
+  uint32_t m_activeSenderFlowCount{0};
 };
 
 } // namespace ns3
