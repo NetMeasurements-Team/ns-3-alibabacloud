@@ -10,7 +10,9 @@
 #include <ns3/rdma-queue-pair.h>
 #include <ns3/rdma.h>
 
+#include <map>
 #include <set>
+#include <tuple>
 #include <unordered_map>
 
 namespace ns3
@@ -19,6 +21,23 @@ class RdmaQueuePair;
 class RdmaQueuePairGroup;
 class RdmaRxQueuePair;
 class RdmaCongestionOps;
+
+// 5-tuple identifying a flow, used as the key for RdmaHw::m_expectedFlowHits
+// (see RecordExpectedFlowHits below). Ordered (operator<) rather than hashed
+// so the oracle dump comes out in a stable, deterministic order -- useful
+// since its whole purpose is being diffed against another dataset.
+struct FlowKey5Tuple
+{
+    uint32_t sip, dip;
+    uint16_t sport, dport;
+    uint8_t proto;
+
+    bool operator<(const FlowKey5Tuple& o) const
+    {
+        return std::tie(sip, dip, sport, dport, proto) <
+               std::tie(o.sip, o.dip, o.sport, o.dport, o.proto);
+    }
+};
 
 struct RdmaInterfaceMgr
 {
@@ -108,6 +127,31 @@ class RdmaHw : public Object
     {
         m_sourceRouteCb = cb;
     }
+
+    // Expected-switch-hit oracle: gated by ENABLE_EXPECTED_FLOW_HIT_TRACKING.
+    // For every source-routed packet this host itself originates (data or
+    // ACK/NACK), records "+1" against every real switch (node type == 1;
+    // NVSwitches and the destination host are excluded) on the path that
+    // packet is about to take, keyed by the packet's own 5-tuple. Unlike
+    // path construction (SourceRouteCallback above), this needs nothing
+    // from the astra-sim frontend -- only NodeList::GetNode()/GetNodeType(),
+    // both plain ns-3-core APIs -- so it's a direct method call, not a
+    // callback. Kept as a private-to-this-host map (not a shared/global
+    // structure): each RdmaHw instance is only ever touched by the one
+    // thread that owns its node's ns-3 MTP logical process, so no locking
+    // is needed. See claude_reports/FLOW_HIT_ORACLE_PLAN.md.
+    bool m_expectedFlowHitTracking;
+    std::map<uint16_t, std::map<FlowKey5Tuple, uint64_t>> m_expectedFlowHits;
+    const std::map<uint16_t, std::map<FlowKey5Tuple, uint64_t>>& GetExpectedFlowHits() const
+    {
+        return m_expectedFlowHits;
+    }
+    void RecordExpectedFlowHits(const std::vector<uint16_t>& path,
+                                 uint32_t sip,
+                                 uint32_t dip,
+                                 uint16_t sport,
+                                 uint16_t dport,
+                                 uint8_t proto);
 
     // for monitor
     /** <port_id, tx_bytes> */
@@ -232,7 +276,7 @@ class RdmaHw : public Object
      * Get the next packet to send, inc snd_nxt
      */
     Ptr<Packet> GetNxtPacket(Ptr<RdmaQueuePair> qp);
-    Ptr<Packet> GenDataPacket(Ptr<RdmaQueuePair> qp, uint32_t pkt_size);
+    Ptr<Packet> GenDataPacket(Ptr<RdmaQueuePair> qp, uint32_t pkt_size, bool recordExpectedHits = true);
     void PktSent(Ptr<RdmaQueuePair> qp, Ptr<Packet> pkt, Time interframeGap);
     void UpdateNextAvail(Ptr<RdmaQueuePair> qp, Time interframeGap, uint32_t pkt_size);
     void ChangeRate(Ptr<RdmaQueuePair> qp, DataRate new_rate);

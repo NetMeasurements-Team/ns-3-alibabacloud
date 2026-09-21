@@ -12,6 +12,7 @@
 #include "ns3/sr-header.h"
 #include "ns3/uinteger.h"
 #include <ns3/ipv4-header.h>
+#include <ns3/node-list.h>
 #include <ns3/simple-seq-ts-header.h>
 #include <ns3/simulator.h>
 #include <ns3/udp-header.h>
@@ -135,6 +136,15 @@ RdmaHw::GetTypeId(void)
                           "relying on switch-side ECMP",
                           BooleanValue(false),
                           MakeBooleanAccessor(&RdmaHw::m_sourceRouting),
+                          MakeBooleanChecker())
+            .AddAttribute("ExpectedFlowHitTracking",
+                          "Record, for every source-routed packet this host sends, "
+                          "which real switches (NVSwitches excluded) it is expected "
+                          "to traverse, keyed by the packet's 5-tuple -- an oracle "
+                          "dumped per host at the end of the run for later comparison "
+                          "against actual switch-side counters",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&RdmaHw::m_expectedFlowHitTracking),
                           MakeBooleanChecker());
     return tid;
 }
@@ -300,7 +310,8 @@ RdmaHw::AddQueuePair(uint32_t src,
     qp->m_max_rate = m_bps;
 
 
-    Ptr<Packet> mtuPacket = GenDataPacket(qp, m_mtu);
+    // Sized only, never transmitted -- must not count toward the expected-hit oracle.
+    Ptr<Packet> mtuPacket = GenDataPacket(qp, m_mtu, false);
     qp->m_tokenBucket.Init(
         mtuPacket->GetSize(),
         Simulator::Now(),
@@ -609,16 +620,33 @@ RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader& ch)
             // Reverse direction: this node (ch.dip) -> original sender (ch.sip).
             // A fresh call per ACK/NACK, independent of the data packet it is
             // acknowledging, so it may take a different equal-cost path.
-            std::vector<uint16_t> segs =
+            std::vector<uint16_t> path =
                 m_sourceRouteCb(IpToNodeId(ch.dip), IpToNodeId(ch.sip));
-            if (!segs.empty())
+            if (!path.empty())
             {
-                SrHeader srh;
-                srh.SetNextHeader(l4Proto);
-                srh.SetPtr(0);
-                srh.SetSegments(segs);
-                newp->AddHeader(srh);
-                l4Proto = SrHeader::PROTO_NUMBER;
+                // sip/dip/sport/dport reversed relative to the original data
+                // packet's ch fields, to match this ACK/NACK packet's own
+                // actual wire-level 5-tuple (it really is sent from ch.dip to
+                // ch.sip) -- see RecordExpectedFlowHits/FLOW_HIT_ORACLE_PLAN.md.
+                if (m_expectedFlowHitTracking)
+                {
+                    RecordExpectedFlowHits(path,
+                                            ch.dip,
+                                            ch.sip,
+                                            ch.udp.dport,
+                                            ch.udp.sport,
+                                            l4Proto);
+                }
+                std::vector<uint16_t> segs(path.begin() + 1, path.end());
+                if (!segs.empty())
+                {
+                    SrHeader srh;
+                    srh.SetNextHeader(l4Proto);
+                    srh.SetPtr(0);
+                    srh.SetSegments(segs);
+                    newp->AddHeader(srh);
+                    l4Proto = SrHeader::PROTO_NUMBER;
+                }
             }
         }
 
@@ -1090,7 +1118,26 @@ void RdmaHw::RtoHandler(Ptr<RdmaQueuePair> qp)
     }
 }
 
-Ptr<Packet> RdmaHw::GenDataPacket(Ptr<RdmaQueuePair> qp, uint32_t pkt_size)
+void
+RdmaHw::RecordExpectedFlowHits(const std::vector<uint16_t>& path,
+                                uint32_t sip,
+                                uint32_t dip,
+                                uint16_t sport,
+                                uint16_t dport,
+                                uint8_t proto)
+{
+    if (path.empty())
+        return;
+    FlowKey5Tuple flow{sip, dip, sport, dport, proto};
+    for (uint16_t nodeId : path)
+    {
+        Ptr<Node> node = NodeList::GetNode(nodeId);
+        if (node->GetNodeType() == 1) // real switches only; NVSwitches (2) and the dst host (0) are skipped
+            m_expectedFlowHits[nodeId][flow]++;
+    }
+}
+
+Ptr<Packet> RdmaHw::GenDataPacket(Ptr<RdmaQueuePair> qp, uint32_t pkt_size, bool recordExpectedHits)
 {
     Ptr<Packet> p = Create<Packet>(pkt_size);
     // add SimpleSeqTsHeader
@@ -1110,16 +1157,33 @@ Ptr<Packet> RdmaHw::GenDataPacket(Ptr<RdmaQueuePair> qp, uint32_t pkt_size)
     uint8_t l4Proto = 0x11;
     if (m_sourceRouting && !m_sourceRouteCb.IsNull())
     {
-        std::vector<uint16_t> segs =
+        std::vector<uint16_t> path =
             m_sourceRouteCb(IpToNodeId(qp->sip.Get()), IpToNodeId(qp->dip.Get()));
-        if (!segs.empty())
+        if (!path.empty())
         {
-            SrHeader srh;
-            srh.SetNextHeader(l4Proto);
-            srh.SetPtr(0);
-            srh.SetSegments(segs);
-            p->AddHeader(srh);
-            l4Proto = SrHeader::PROTO_NUMBER;
+            // Record against the real protocol (0x11) before it's possibly
+            // overwritten to the SRH sentinel below, and using the full path
+            // (path[0] is the implicit first hop, never part of the wire
+            // segments) -- see RecordExpectedFlowHits/FLOW_HIT_ORACLE_PLAN.md.
+            if (m_expectedFlowHitTracking && recordExpectedHits)
+            {
+                RecordExpectedFlowHits(path,
+                                        qp->sip.Get(),
+                                        qp->dip.Get(),
+                                        qp->sport,
+                                        qp->dport,
+                                        l4Proto);
+            }
+            std::vector<uint16_t> segs(path.begin() + 1, path.end());
+            if (!segs.empty())
+            {
+                SrHeader srh;
+                srh.SetNextHeader(l4Proto);
+                srh.SetPtr(0);
+                srh.SetSegments(segs);
+                p->AddHeader(srh);
+                l4Proto = SrHeader::PROTO_NUMBER;
+            }
         }
     }
     // add ipv4 header
