@@ -220,7 +220,7 @@ void SwitchNode::ClearTable(){
 
 // This function can only be called in switch mode
 bool SwitchNode::SwitchReceiveFromDevice(Ptr<NetDevice> device, Ptr<Packet> packet, CustomHeader &ch){
-    Simulator::Schedule(MicroSeconds(m_forwardDelay), &SwitchNode::SendToDev, this, packet, ch);
+    Simulator::Schedule(NanoSeconds(m_forwardDelay*1000), &SwitchNode::SendToDev, this, packet, ch);
 	return true;
 }
 
