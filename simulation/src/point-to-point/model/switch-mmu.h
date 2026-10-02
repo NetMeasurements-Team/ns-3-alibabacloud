@@ -50,15 +50,19 @@ public:
 	uint32_t resume_offset;
 	uint32_t kmin[pCnt], kmax[pCnt];
 	double pmax[pCnt];
-	uint32_t total_hdrm;
-	uint32_t total_rsrv;
+	uint64_t total_hdrm;
+	uint64_t total_rsrv;
 
 	// runtime
 	uint32_t shared_used_bytes;
 	uint32_t hdrm_bytes[pCnt][qCnt];
-	uint32_t ingress_bytes[pCnt][qCnt];
+	uint32_t
+    ingress_bytes[pCnt][qCnt];
 	uint32_t paused[pCnt][qCnt];
 	uint64_t egress_bytes[pCnt][qCnt];
+private:
+	enum class IngressRegion { Normal, Headroom, Rejected };
+	IngressRegion ClassifyIngress(uint32_t port, uint32_t qIndex, uint32_t psize);
 };
 
 } /* namespace ns3 */

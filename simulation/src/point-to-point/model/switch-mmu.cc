@@ -1,5 +1,6 @@
 #include <iostream>
 #include <fstream>
+#include "ns3/abort.h"
 #include "ns3/packet.h"
 #include "ns3/simulator.h"
 #include "ns3/object-vector.h"
@@ -26,6 +27,15 @@ namespace ns3 {
 		reserve = 4 * 1024;
 		resume_offset = 3 * 1024;
 
+		// Initialize configuration before the frontend fills the per-port values.
+		node_id = 0;
+		total_hdrm = total_rsrv = 0;
+		memset(headroom, 0, sizeof(headroom));
+		memset(pfc_a_shift, 0, sizeof(pfc_a_shift));
+		memset(kmin, 0, sizeof(kmin));
+		memset(kmax, 0, sizeof(kmax));
+		memset(pmax, 0, sizeof(pmax));
+
 		// headroom
 		shared_used_bytes = 0;
 		memset(hdrm_bytes, 0, sizeof(hdrm_bytes));
@@ -33,45 +43,62 @@ namespace ns3 {
 		memset(paused, 0, sizeof(paused));
 		memset(egress_bytes, 0, sizeof(egress_bytes));
 	}
+	SwitchMmu::IngressRegion SwitchMmu::ClassifyIngress(uint32_t port, uint32_t qIndex, uint32_t psize){
+		NS_ABORT_MSG_IF(port == 0 || port >= pCnt || qIndex == 0 || qIndex >= qCnt,
+		                "Invalid MMU ingress port or data priority");
+		// Validate the partition even when the packet fits in the reservation.
+		const uint32_t threshold = GetPfcThreshold(port);
+		const uint64_t next = uint64_t{ingress_bytes[port][qIndex]} + psize;
+		if (next <= reserve || next - reserve <= threshold)
+			return IngressRegion::Normal;
+		if (uint64_t{hdrm_bytes[port][qIndex]} + psize <= headroom[port])
+			return IngressRegion::Headroom;
+		return IngressRegion::Rejected;
+	}
 	bool SwitchMmu::CheckIngressAdmission(uint32_t port, uint32_t qIndex, uint32_t psize){
-		if (psize + hdrm_bytes[port][qIndex] > headroom[port] && psize + GetSharedUsed(port, qIndex) > GetPfcThreshold(port)){
-			// printf("%lu %u Drop: queue:%u,%u: Headroom full\n", Simulator::Now().GetTimeStep(), node_id, port, qIndex);
-			// for (uint32_t i = 1; i < 64; i++)
-			// 	printf("(%u,%u)", hdrm_bytes[i][3], ingress_bytes[i][3]);
-			// printf("\n");
-		    std::cout << "node " << node_id << ": dropping lossless packet (port" << port <<", qIndex "<< qIndex <<") at ingress admission headroom " << hdrm_bytes[port][qIndex] << " of " << headroom[port] << " pktSize " << psize << " shared used " << GetSharedUsed(port, qIndex) << " threshold " << GetPfcThreshold(port) << std::endl;
-			return false;
-		}
-		return true;
+		if (ClassifyIngress(port, qIndex, psize) != IngressRegion::Rejected)
+			return true;
+		std::cout << "node " << node_id << ": dropping lossless packet (port " << port
+		          << ", priority " << qIndex << "), headroom " << hdrm_bytes[port][qIndex]
+		          << "/" << headroom[port] << ", packet " << psize << std::endl;
+		return false;
 	}
 	bool SwitchMmu::CheckEgressAdmission(uint32_t port, uint32_t qIndex, uint32_t psize){
 		return true;
 	}
 	void SwitchMmu::UpdateIngressAdmission(uint32_t port, uint32_t qIndex, uint32_t psize){
-		uint32_t new_bytes = ingress_bytes[port][qIndex] + psize;
-		if (new_bytes <= reserve){
-			ingress_bytes[port][qIndex] += psize;
-		}else {
-			uint32_t thresh = GetPfcThreshold(port);
-			if (new_bytes - reserve > thresh){
-				hdrm_bytes[port][qIndex] += psize;
-			}else {
-				ingress_bytes[port][qIndex] += psize;
-				shared_used_bytes += std::min(psize, new_bytes - reserve);
-			}
-		}
+		const IngressRegion region = ClassifyIngress(port, qIndex, psize);
+		NS_ABORT_MSG_IF(region == IngressRegion::Rejected,
+		    "Accounting for a packet rejected by the MMU");
+        if (region == IngressRegion::Headroom)
+        {
+            hdrm_bytes[port][qIndex] += psize;
+        }
+        else
+        {
+            const uint32_t old_shared = GetSharedUsed(port, qIndex);
+            ingress_bytes[port][qIndex] += psize;
+            shared_used_bytes += GetSharedUsed(port, qIndex) - old_shared;
+        }
 	}
 	void SwitchMmu::UpdateEgressAdmission(uint32_t port, uint32_t qIndex, uint32_t psize){
 		egress_bytes[port][qIndex] += psize;
 	}
 	void SwitchMmu::RemoveFromIngressAdmission(uint32_t port, uint32_t qIndex, uint32_t psize){
+		NS_ABORT_MSG_IF(uint64_t{ingress_bytes[port][qIndex]} + hdrm_bytes[port][qIndex] < psize,
+		                "Ingress accounting underflow");
 		uint32_t from_hdrm = std::min(hdrm_bytes[port][qIndex], psize);
-		uint32_t from_shared = std::min(psize - from_hdrm, ingress_bytes[port][qIndex] > reserve ? ingress_bytes[port][qIndex] - reserve : 0);
+        uint32_t from_shared = std::min(
+            psize - from_hdrm,
+            ingress_bytes[port][qIndex] > reserve ? ingress_bytes[port][qIndex] - reserve : 0);
+		NS_ABORT_MSG_IF(from_shared > shared_used_bytes, "Shared accounting underflow");
+		// Aggregate accounting releases headroom first, then shared and reserved bytes.
 		hdrm_bytes[port][qIndex] -= from_hdrm;
 		ingress_bytes[port][qIndex] -= psize - from_hdrm;
 		shared_used_bytes -= from_shared;
 	}
 	void SwitchMmu::RemoveFromEgressAdmission(uint32_t port, uint32_t qIndex, uint32_t psize){
+		NS_ABORT_MSG_IF(psize > egress_bytes[port][qIndex], "Egress accounting underflow");
 		egress_bytes[port][qIndex] -= psize;
 	}
 	bool SwitchMmu::CheckShouldPause(uint32_t port, uint32_t qIndex){
@@ -81,7 +108,8 @@ namespace ns3 {
 		if (!paused[port][qIndex])
 			return false;
 		uint32_t shared_used = GetSharedUsed(port, qIndex);
-		return hdrm_bytes[port][qIndex] == 0 && (shared_used == 0 || shared_used + resume_offset <= GetPfcThreshold(port));
+        return hdrm_bytes[port][qIndex] == 0 &&
+               (shared_used == 0 || uint64_t{shared_used} + resume_offset <= GetPfcThreshold(port));
 	}
 	void SwitchMmu::SetPause(uint32_t port, uint32_t qIndex){
 		paused[port][qIndex] = true;
@@ -89,10 +117,19 @@ namespace ns3 {
 	void SwitchMmu::SetResume(uint32_t port, uint32_t qIndex){
 		paused[port][qIndex] = false;
 	}
+    uint32_t SwitchMmu::GetPfcThreshold(uint32_t port){
+        NS_ABORT_MSG_IF(port == 0 || port >= pCnt, "Invalid MMU port");
 
-	uint32_t SwitchMmu::GetPfcThreshold(uint32_t port){
-		return (buffer_size - total_hdrm - total_rsrv - shared_used_bytes) >> pfc_a_shift[port];
-	}
+        const uint64_t fixed = total_hdrm + total_rsrv;
+        NS_ABORT_MSG_IF(fixed >= buffer_size, "Headroom and reservations leave no shared buffer");
+
+        const uint64_t shared_capacity = uint64_t{buffer_size} - fixed;
+        NS_ABORT_MSG_IF(shared_used_bytes > shared_capacity,
+                        "Shared-buffer accounting exceeds capacity");
+        NS_ABORT_MSG_IF(pfc_a_shift[port] >= 32, "Invalid PFC threshold shift");
+
+        return static_cast<uint32_t>((shared_capacity - shared_used_bytes) >> pfc_a_shift[port]);
+    }
 	uint32_t SwitchMmu::GetSharedUsed(uint32_t port, uint32_t qIndex){
 		uint32_t used = ingress_bytes[port][qIndex];
 		return used > reserve ? used - reserve : 0;
@@ -102,8 +139,11 @@ namespace ns3 {
 			return false;
 		if (egress_bytes[ifindex][qIndex] > kmax[ifindex])
 			return true;
-		if (egress_bytes[ifindex][qIndex] > kmin[ifindex]){
-			double p = pmax[ifindex] * double(egress_bytes[ifindex][qIndex] - kmin[ifindex]) / (kmax[ifindex] - kmin[ifindex]);
+		if (egress_bytes[ifindex][qIndex] > kmin[ifindex])
+        {
+            const double p = pmax[ifindex] *
+                             static_cast<double>(egress_bytes[ifindex][qIndex] - kmin[ifindex]) /
+                             (kmax[ifindex] - kmin[ifindex]);
 			if (UniformVariable(0, 1).GetValue() < p)
 				return true;
 		}
@@ -115,9 +155,11 @@ namespace ns3 {
 		pmax[port] = _pmax;
 	}
 	void SwitchMmu::ConfigHdrm(uint32_t port, uint32_t size){
+		NS_ABORT_MSG_IF(port == 0 || port >= pCnt, "Invalid headroom port");
 		headroom[port] = size;
 	}
 	void SwitchMmu::ConfigNPort(uint32_t n_port){
+		NS_ABORT_MSG_IF(n_port >= pCnt, "Too many MMU ports");
 		total_hdrm = 0;
 		total_rsrv = 0;
 		for (uint32_t i = 1; i <= n_port; i++){
@@ -126,6 +168,10 @@ namespace ns3 {
 		}
 	}
 	void SwitchMmu::ConfigBufferSize(uint32_t size){
+		NS_ABORT_MSG_IF(total_hdrm + total_rsrv >= size,
+		    "Headroom and reservations leave no shared buffer");
+		NS_ABORT_MSG_IF(shared_used_bytes > size - total_hdrm - total_rsrv,
+		    "Shared-buffer accounting exceeds capacity");
 		buffer_size = size;
 	}
 }

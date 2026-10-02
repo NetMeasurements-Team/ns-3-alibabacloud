@@ -1,3 +1,4 @@
+#include "ns3/abort.h"
 #include "ns3/ipv4.h"
 #include "ns3/packet.h"
 #include "ns3/ipv4-header.h"
@@ -145,6 +146,10 @@ void SwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch){
 			qIndex = (ch.l3Prot == 0x06 ? 1 : ch.udp.pg); // if TCP, put to queue 1
 		}
 		// std::cout << "qIndex is: " << qIndex << std::endl;
+
+		// The frontend budgets one protected RDMA priority per ordinary-switch port.
+		NS_ABORT_MSG_IF(qIndex != 0 && qIndex != 3,
+		                "Ordinary switches support only data priority 3 and control priority 0");
 
 		// admission control
 		FlowIdTag t;
