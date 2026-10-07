@@ -15,6 +15,7 @@ simulation/core.*
 simulation/.waf*-*
 simulation/cmake-cache/*
 simulation/src/applications/astra-sim
+simulation/src/applications/SimCCL
 
 !simulation/cmake-cache/.gitkeep
 
