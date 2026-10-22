@@ -1155,7 +1155,14 @@ RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp)
 
 void RdmaHw::InitRto(Ptr<RdmaQueuePair> qp)
 {
-    if (!m_enable_rto)
+    // Was `if (!m_enable_rto)`, which armed the retransmit timer only when the
+    // feature was switched OFF, while QpComplete cancels it only when the
+    // feature is ON. The two guards contradicted each other, so neither setting
+    // of RTO gave working timeout recovery: RTO 0 armed timers that were never
+    // cancelled (and a stale one suppresses arming for the next message on a
+    // reused QP, via the IsExpired() gate in GenDataPacket), RTO 1 armed none at
+    // all. Now both guards agree and RTO 1 means what it says.
+    if (m_enable_rto)
     {
         // if (qp->m_rtoEvent.IsRunning())
         // {
