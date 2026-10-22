@@ -24,6 +24,7 @@
 #include "ns3/header.h"
 #include "ns3/int-header.h"
 #include "ns3/sr-header.h"
+#include "ns3/telemetry-header.h"
 
 namespace ns3 {
 /**
@@ -146,6 +147,24 @@ public:
 	  uint8_t numSegments;
 	  uint16_t segs[SrHeader::maxSegments];
   } srh;
+
+  // Per-hop flow-index telemetry header, present when the byte that would
+  // otherwise name the L4 protocol (the SRH's nextHeader when an SRH is
+  // present, the IPv4 protocol field otherwise) was
+  // TelemetryHeader::PROTO_NUMBER. Chains off the SRH the same way the SRH
+  // chains off IPv4, and like it is not part of the union above: it
+  // coexists with whichever L4 protocol actually follows. When present,
+  // l3Prot is overwritten with this header's own nextHeader value, so all
+  // existing l3Prot-based branching elsewhere keeps working unmodified.
+  //
+  // idx[k] is this flow's index at the switch occupying position k of the
+  // packet's full path, which means a switch reads its own index as
+  // idx[srh.ptr] -- see telemetry-header.h.
+  struct {
+	  bool present;
+	  uint8_t numFields;
+	  uint16_t idx[TelemetryHeader::maxHops];
+  } tel;
 
   uint8_t GetIpv4EcnBits (void) const;
   static uint32_t GetAckSerializedSize(void);

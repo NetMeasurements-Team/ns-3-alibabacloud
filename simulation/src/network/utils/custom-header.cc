@@ -46,6 +46,7 @@ CustomHeader::CustomHeader ()
     m_headerSize(5*4)
 {
 	srh.present = false;
+	tel.present = false;
 }
 CustomHeader::CustomHeader (uint32_t _headerType)
   : brief(1), headerType(_headerType),
@@ -64,6 +65,7 @@ CustomHeader::CustomHeader (uint32_t _headerType)
     m_headerSize(5*4)
 {
 	srh.present = false;
+	tel.present = false;
 }
 
 TypeId 
@@ -94,6 +96,8 @@ uint32_t CustomHeader::GetSerializedSize (void) const{
 	if (headerType & L4_Header){
 		if (srh.present)
 			len += SrHeader::GetStaticSize();
+		if (tel.present)
+			len += TelemetryHeader::GetStaticSize();
 		if (l3Prot == 0x6) // TCP
 			len += tcp.length * 4;
 		else if (l3Prot == 0x11) // UDP
@@ -135,20 +139,35 @@ void CustomHeader::Serialize (Buffer::Iterator start) const{
 	  uint8_t frag = fragmentOffset & 0xff;
 	  i.WriteU8 (frag);
 	  i.WriteU8 (m_ttl);
-	  i.WriteU8 (srh.present ? SrHeader::PROTO_NUMBER : l3Prot);
+	  // Outermost protocol byte names the first extension header present,
+	  // falling through to the real L4 protocol when there is none.
+	  i.WriteU8 (srh.present ? SrHeader::PROTO_NUMBER
+	             : (tel.present ? TelemetryHeader::PROTO_NUMBER : l3Prot));
 	  i.WriteHtonU16 (0);
 	  i.WriteHtonU32 (sip);
 	  i.WriteHtonU32 (dip);
   }
 
   // Source Routing Header, written between the IPv4 header and the real L4
-  // header when present (see Deserialize for the matching read side).
+  // header when present (see Deserialize for the matching read side). Its
+  // nextHeader names the telemetry header when one follows, otherwise the
+  // real L4 protocol.
   if ((headerType & L4_Header) && srh.present){
-	  i.WriteU8 (l3Prot);
+	  i.WriteU8 (tel.present ? TelemetryHeader::PROTO_NUMBER : l3Prot);
 	  i.WriteU8 (srh.numSegments);
 	  i.WriteU8 (srh.ptr);
 	  for (uint32_t j = 0; j < SrHeader::maxSegments; j++)
 		  i.WriteU16 (srh.segs[j]);
+  }
+
+  // Telemetry header, written after the SRH and never before it: the SRH's
+  // position immediately after the IPv4 header is hard-coded as
+  // PppHeader::GetStaticSize() + 20 in the switch fast paths.
+  if ((headerType & L4_Header) && tel.present){
+	  i.WriteU8 (l3Prot);
+	  i.WriteU8 (tel.numFields);
+	  for (uint32_t j = 0; j < TelemetryHeader::maxHops; j++)
+		  i.WriteU16 (tel.idx[j]);
   }
 
   // L4
@@ -284,12 +303,41 @@ CustomHeader::Deserialize (Buffer::Iterator start)
 	  srh.present = false;
   }
 
+  // Telemetry header: chains off the SRH exactly as the SRH chains off the
+  // IPv4 header, so by this point l3Prot already holds the SRH's nextHeader
+  // (or the raw IPv4 protocol byte when there is no SRH) and the same
+  // sentinel test covers both cases. As with the SRH, l3Prot is then
+  // overwritten with this header's own nextHeader so every downstream
+  // l3Prot branch -- here and everywhere else that reads ch.l3Prot -- keeps
+  // working unmodified.
+  int telSize = 0;
+  if ((headerType & L4_Header) && l3Prot == TelemetryHeader::PROTO_NUMBER){
+	  i = start;
+	  i.Next(l2Size + l3Size + srhSize);
+	  uint8_t telNextHeader = i.ReadU8();
+	  tel.numFields = i.ReadU8();
+	  for (uint32_t j = 0; j < TelemetryHeader::maxHops; j++)
+		  tel.idx[j] = i.ReadU16();
+	  tel.present = true;
+	  telSize = TelemetryHeader::GetStaticSize();
+	  l3Prot = telNextHeader;
+  } else {
+	  // Zero the fields too, not just the flag. They sit immediately after srh in
+	  // the struct, so an out-of-bounds srh.segs[ptr] read lands here -- leaving
+	  // stale values from a previously parsed packet would hand the forwarding
+	  // path a plausible-looking node id.
+	  tel.present = false;
+	  tel.numFields = 0;
+	  for (uint32_t j = 0; j < TelemetryHeader::maxHops; j++)
+		  tel.idx[j] = TelemetryHeader::NO_INDEX;
+  }
+
   // TCP
   int l4Size = 0;
   if (headerType & L4_Header){
 	  if (l3Prot == 0x6){ // TCP
 		  i = start;
-		  i.Next(l2Size + l3Size + srhSize);
+		  i.Next(l2Size + l3Size + srhSize + telSize);
 		  tcp.sport = i.ReadNtohU16 ();
 		  tcp.dport = i.ReadNtohU16 ();
 		  tcp.seq = i.ReadNtohU64 ();
@@ -315,7 +363,7 @@ CustomHeader::Deserialize (Buffer::Iterator start)
 		  l4Size = tcp.length * 4;
 	  }else if (l3Prot == 0x11){ // UDP + SeqTsHeader
 		  i = start;
-		  i.Next(l2Size + l3Size + srhSize);
+		  i.Next(l2Size + l3Size + srhSize + telSize);
 		  // udp header
 		  udp.sport = i.ReadNtohU16 ();
 		  udp.dport = i.ReadNtohU16 ();
@@ -357,7 +405,7 @@ CustomHeader::Deserialize (Buffer::Iterator start)
 	  }
   }
 
-  return l2Size + l3Size + srhSize + l4Size;
+  return l2Size + l3Size + srhSize + telSize + l4Size;
 }
 
 uint8_t CustomHeader::GetIpv4EcnBits (void) const{

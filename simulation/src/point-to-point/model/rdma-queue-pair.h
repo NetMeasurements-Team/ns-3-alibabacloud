@@ -10,6 +10,7 @@
 
 #include <mutex>
 #include <queue>
+#include <utility>
 #include <vector>
 
 namespace ns3
@@ -35,6 +36,18 @@ class RdmaQueuePair : public Object
     uint32_t lastPktSize;
     Callback<void> m_notifyAppFinish;
     Callback<void> m_notifyAppSent;
+
+    // Telemetry flow index (claude_reports/TELEMETRY_FLOW_INDEX_PLAN.md):
+    // this flow's [(switchId, index)] list, sorted by switchId, covering every
+    // real switch on its shortest-path DAG. Resolved once when the QP is
+    // created and never per packet -- the 5-tuple is fixed for a QP's whole
+    // life, only the path varies. BORROWED, not owned: it points into the
+    // frontend's telemetry_index, which is built before Simulator::Run() and
+    // never mutated afterwards, so this needs no locking and no per-host copy.
+    // nullptr means the presimulation's flow list did not contain this flow;
+    // empty means the flow has no real switch on its path (NVSwitch-only),
+    // and in both cases no telemetry header is attached.
+    const std::vector<std::pair<uint16_t, uint16_t>>* m_telIdx = nullptr;
     /******************************
      * runtime states
      *****************************/
@@ -162,6 +175,13 @@ class RdmaRxQueuePair : public Object
     int32_t m_milestone_rx;
     uint32_t m_lastNACK;
     EventId QcnTimerEvent; // if destroy this rxQp, remember to cancel this timer
+
+    // Telemetry index for the ACK/NACK direction of this QP -- i.e. the
+    // reversed 5-tuple relative to the data packets this rxQp receives.
+    // Resolved lazily on the first ACK built, then reused. See
+    // RdmaQueuePair::m_telIdx for the ownership/locking argument.
+    const std::vector<std::pair<uint16_t, uint16_t>>* m_telIdx = nullptr;
+    bool m_telIdxResolved = false;
 
     class RdmaMessage {
     public:

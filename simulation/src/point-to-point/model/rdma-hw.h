@@ -9,11 +9,14 @@
 #include <ns3/node.h>
 #include <ns3/rdma-queue-pair.h>
 #include <ns3/rdma.h>
+#include <ns3/telemetry-header.h>
 
 #include <map>
 #include <set>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace ns3
 {
@@ -121,7 +124,10 @@ class RdmaHw : public Object
     // is what gets registered here. Called fresh for every packet (never
     // cached on the QP), so packets of the same flow can be sprayed across
     // different equal-cost paths.
-    typedef Callback<std::vector<uint16_t>, uint32_t, uint32_t> SourceRouteCallback;
+    // (srcNodeId, dstNodeId, firstHopNodeId). The third argument is the node the
+    // packet will actually reach first, resolved from the NIC this QP transmits
+    // from -- not a guess. UINT32_MAX means "unknown, sample one".
+    typedef Callback<std::vector<uint16_t>, uint32_t, uint32_t, uint32_t> SourceRouteCallback;
     SourceRouteCallback m_sourceRouteCb;
     void SetSourceRouteCb(SourceRouteCallback cb)
     {
@@ -152,6 +158,71 @@ class RdmaHw : public Object
                                  uint16_t sport,
                                  uint16_t dport,
                                  uint8_t proto);
+
+    // ---- Telemetry flow index -------------------------------------------
+    // See claude_reports/TELEMETRY_FLOW_INDEX_PLAN.md. Gated by
+    // ENABLE_TELEMETRY_FLOW_INDEX; only ever attaches a header to packets
+    // that already carry an SRH, because field k is indexed by the SRH's own
+    // pointer (see telemetry-header.h).
+    bool m_telemetryFlowIndex;
+    bool m_telemetryOnAcks;
+
+    // Resolves a 5-tuple to that flow's [(switchId, index)] list, or nullptr
+    // if the presimulation's flow list does not contain it. Injected from the
+    // astra-sim frontend for the same reason SourceRouteCallback is: the
+    // index table lives in common.h, which this submodule cannot see. The
+    // returned pointer is borrowed and stays valid for the whole run.
+    typedef Callback<const std::vector<std::pair<uint16_t, uint16_t>>*,
+                     uint32_t,
+                     uint32_t,
+                     uint16_t,
+                     uint16_t,
+                     uint8_t>
+        TelemetryIndexCallback;
+    TelemetryIndexCallback m_telemetryIndexCb;
+    void SetTelemetryIndexCb(TelemetryIndexCallback cb)
+    {
+        m_telemetryIndexCb = cb;
+    }
+
+    // This flow's index at `switchId`, or TelemetryHeader::NO_INDEX when the
+    // flow has none there (an NVSwitch hop, or a switch off its DAG). A short
+    // linear scan: `idx` holds one entry per real switch on the flow's DAG,
+    // typically well under two dozen, contiguous and sorted by switch id.
+    // Node id on the far end of the link this NIC plugs into, i.e. the switch (or
+    // NVSwitch) a packet sent from it lands on. UINT32_MAX if unresolvable.
+    uint32_t GetPeerNodeIdOfNic(uint32_t nicIdx);
+
+    static uint16_t LookupTelemetryIdx(const std::vector<std::pair<uint16_t, uint16_t>>* idx,
+                                       uint16_t switchId);
+
+    // Builds the telemetry header for one packet about to be sent along
+    // `path` (the complete path from BuildSourceRoute, including the trailing
+    // destination host). Returns false if nothing should be attached.
+    bool BuildTelemetryHeader(const std::vector<uint16_t>& path,
+                              const std::vector<std::pair<uint16_t, uint16_t>>* idx,
+                              uint8_t l4Proto,
+                              TelemetryHeader& out);
+
+    // Diagnostics, dumped per host at the end of the run. A miss is a packet
+    // whose flow was not in the presimulation's list at all; it is counted and
+    // the packet goes out unstamped, never asserted on -- a run with
+    // known-incomplete telemetry is worth far more than one that aborts.
+    uint64_t m_telemetryStamped = 0;
+    uint64_t m_telemetryUnstamped = 0;
+    std::map<FlowKey5Tuple, uint64_t> m_telemetryMisses;
+    const std::map<FlowKey5Tuple, uint64_t>& GetTelemetryMisses() const
+    {
+        return m_telemetryMisses;
+    }
+    uint64_t GetTelemetryStamped() const
+    {
+        return m_telemetryStamped;
+    }
+    uint64_t GetTelemetryUnstamped() const
+    {
+        return m_telemetryUnstamped;
+    }
 
     // for monitor
     /** <port_id, tx_bytes> */

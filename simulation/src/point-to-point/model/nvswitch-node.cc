@@ -58,6 +58,12 @@ int NVSwitchNode::GetOutDev(Ptr<const Packet> p, CustomHeader &ch){
 	// Source routing bypasses the ECMP table entirely, see SwitchNode::GetOutDev.
 	// The SRH segment is a node id; resolve it to a local port via m_srNextHop.
 	if (m_sourceRouting && ch.srh.present){
+		// Same bounds guard as SwitchNode::GetOutDev: segs is a fixed array and
+		// ptr arrives off the wire as a uint8, so an oversized ptr would read
+		// past it into adjacent CustomHeader memory and could resolve to a real
+		// port, turning one bad packet into a forwarding loop.
+		if (ch.srh.ptr >= SrHeader::maxSegments || ch.srh.ptr >= ch.srh.numSegments)
+			return -1;
 		auto it = m_srNextHop.find(ch.srh.segs[ch.srh.ptr]);
 		if (it == m_srNextHop.end())
 			return -1;

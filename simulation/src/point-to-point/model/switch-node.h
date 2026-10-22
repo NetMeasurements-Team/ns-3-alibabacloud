@@ -2,6 +2,7 @@
 #define SWITCH_NODE_H
 
 #include <unordered_map>
+#include <vector>
 #include <ns3/node.h>
 #include "qbb-net-device.h"
 #include "switch-mmu.h"
@@ -41,9 +42,23 @@ protected:
 	uint32_t m_ackHighPrio; // set high priority for ACK/NACK
     double m_forwardDelay;
 
+	// Telemetry flow-index counters (claude_reports/TELEMETRY_FLOW_INDEX_PLAN.md).
+	// The whole point of the per-switch dense index: this switch allocates
+	// exactly N_s counters and addresses them directly with the telemetry
+	// field for its own position in the path, which is idx[srh.ptr] -- no
+	// lookup, no per-flow state, no hashing.
+	bool m_telemetryCounting;
+	std::vector<uint64_t> m_telemetryCounters;       // one per flow index at this switch
+	uint64_t m_telemetryNoIndex;      // header present but NO_INDEX for this hop
+	uint64_t m_telemetryOutOfRange;   // index >= N_s: flow list and topology disagree
+	uint64_t m_telemetryNoHeader;     // source-routed packet carrying no telemetry header
+	uint64_t m_srPtrOutOfRange;       // SRH pointer past the segment list: dropped, not forwarded
+	uint64_t m_srSelfMismatch;        // segs[ptr-1] != this switch's own id: header describes a different route
+
 private:
 	int GetOutDev(Ptr<const Packet>, CustomHeader &ch);
 	void SendToDev(Ptr<Packet>p, CustomHeader &ch);
+	void CountTelemetry(CustomHeader &ch);
 	static uint32_t EcmpHash(const uint8_t* key, size_t len, uint32_t seed);
 	void CheckAndSendPfc(uint32_t inDev, uint32_t qIndex);
 	void CheckAndSendResume(uint32_t inDev, uint32_t qIndex);
@@ -56,6 +71,13 @@ public:
 	void AddTableEntry(Ipv4Address &dstAddr, uint32_t intf_idx);
 	void AddSrNextHopEntry(uint32_t neighborNodeId, uint32_t intf_idx);
 	void ClearTable();
+	void SetTelemetryCounterCount(uint32_t n);
+	const std::vector<uint64_t>& GetTelemetryCounters() const { return m_telemetryCounters; }
+	uint64_t GetTelemetryNoIndex() const { return m_telemetryNoIndex; }
+	uint64_t GetTelemetryOutOfRange() const { return m_telemetryOutOfRange; }
+	uint64_t GetTelemetryNoHeader() const { return m_telemetryNoHeader; }
+	uint64_t GetSrPtrOutOfRange() const { return m_srPtrOutOfRange; }
+	uint64_t GetSrSelfMismatch() const { return m_srSelfMismatch; }
 	bool SwitchReceiveFromDevice(Ptr<NetDevice> device, Ptr<Packet> packet, CustomHeader &ch);
 	void SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Packet> p);
 

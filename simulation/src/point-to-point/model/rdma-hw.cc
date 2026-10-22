@@ -13,6 +13,7 @@
 #include "ns3/uinteger.h"
 #include <ns3/ipv4-header.h>
 #include <ns3/node-list.h>
+#include <ns3/telemetry-header.h>
 #include <ns3/simple-seq-ts-header.h>
 #include <ns3/simulator.h>
 #include <ns3/udp-header.h>
@@ -136,6 +137,19 @@ RdmaHw::GetTypeId(void)
                           "relying on switch-side ECMP",
                           BooleanValue(false),
                           MakeBooleanAccessor(&RdmaHw::m_sourceRouting),
+                          MakeBooleanChecker())
+            .AddAttribute("TelemetryFlowIndex",
+                          "Stamp every source-routed packet with a telemetry header "
+                          "carrying, for each hop of its path, the index this flow holds "
+                          "at that hop's switch (see TELEMETRY_FLOW_INDEX_PLAN.md)",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&RdmaHw::m_telemetryFlowIndex),
+                          MakeBooleanChecker())
+            .AddAttribute("TelemetryOnAcks",
+                          "Also stamp ACK/NACK packets. They are ~60 bytes, so the "
+                          "telemetry header is proportionally much heavier on them",
+                          BooleanValue(true),
+                          MakeBooleanAccessor(&RdmaHw::m_telemetryOnAcks),
                           MakeBooleanChecker())
             .AddAttribute("ExpectedFlowHitTracking",
                           "Record, for every source-routed packet this host sends, "
@@ -283,6 +297,11 @@ RdmaHw::AddQueuePair(uint32_t src,
     Ptr<RdmaQueuePair> qp = CreateObject<RdmaQueuePair>(pg, sip, dip, sport, dport);
     qp->SetSrc(src);
     qp->SetDest(dest);
+    // Resolve this flow's per-switch telemetry indices once, here, rather than
+    // per packet: the 5-tuple is fixed for the QP's whole life and only the
+    // path varies. Data packets are always 0x11.
+    if (m_telemetryFlowIndex && !m_telemetryIndexCb.IsNull())
+        qp->m_telIdx = m_telemetryIndexCb(sip.Get(), dip.Get(), sport, dport, 0x11);
     qp->SetWin(win);
     qp->SetBaseRtt(baseRtt);
     qp->SetVarWin(m_var_win);
@@ -621,7 +640,8 @@ RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader& ch)
             // A fresh call per ACK/NACK, independent of the data packet it is
             // acknowledging, so it may take a different equal-cost path.
             std::vector<uint16_t> path =
-                m_sourceRouteCb(IpToNodeId(ch.dip), IpToNodeId(ch.sip));
+                m_sourceRouteCb(IpToNodeId(ch.dip), IpToNodeId(ch.sip),
+                                GetPeerNodeIdOfNic(GetNicIdxOfRxQp(rxQp)));
             if (!path.empty())
             {
                 // sip/dip/sport/dport reversed relative to the original data
@@ -637,12 +657,53 @@ RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader& ch)
                                             ch.udp.sport,
                                             l4Proto);
                 }
-                std::vector<uint16_t> segs(path.begin() + 1, path.end());
-                if (!segs.empty())
+                // The segment list now carries the FULL path, first hop included, so every
+                // switch can identify itself as segs[ptr-1]. ptr therefore starts at 1:
+                // at 0 the first switch would read its own id, which is not in its
+                // neighbour table, and drop the packet.
+                std::vector<uint16_t> segs(path.begin(), path.end());
+                if (segs.size() >= 2)
                 {
+                    uint8_t inner = l4Proto;
+                    if (m_telemetryFlowIndex && m_telemetryOnAcks)
+                    {
+                        // Resolve once per rxQp, using the same reversed tuple
+                        // the oracle call above uses. NACK (0xFD) folds onto
+                        // ACK (0xFC) for indexing -- they are the same logical
+                        // reverse-direction flow and a flow list built from
+                        // fct.txt contains no NACK rows at all -- so one cached
+                        // pointer serves both.
+                        if (!rxQp->m_telIdxResolved)
+                        {
+                            if (!m_telemetryIndexCb.IsNull())
+                                rxQp->m_telIdx = m_telemetryIndexCb(ch.dip,
+                                                                    ch.sip,
+                                                                    ch.udp.dport,
+                                                                    ch.udp.sport,
+                                                                    0xFC);
+                            rxQp->m_telIdxResolved = true;
+                        }
+                        TelemetryHeader tel;
+                        if (BuildTelemetryHeader(path, rxQp->m_telIdx, inner, tel))
+                        {
+                            newp->AddHeader(tel);
+                            inner = TelemetryHeader::PROTO_NUMBER;
+                            m_telemetryStamped++;
+                        }
+                        else
+                        {
+                            m_telemetryUnstamped++;
+                            if (!rxQp->m_telIdx)
+                                m_telemetryMisses[FlowKey5Tuple{ch.dip,
+                                                                ch.sip,
+                                                                ch.udp.dport,
+                                                                ch.udp.sport,
+                                                                0xFC}]++;
+                        }
+                    }
                     SrHeader srh;
-                    srh.SetNextHeader(l4Proto);
-                    srh.SetPtr(0);
+                    srh.SetNextHeader(inner);
+                    srh.SetPtr(1);
                     srh.SetSegments(segs);
                     newp->AddHeader(srh);
                     l4Proto = SrHeader::PROTO_NUMBER;
@@ -1137,6 +1198,63 @@ RdmaHw::RecordExpectedFlowHits(const std::vector<uint16_t>& path,
     }
 }
 
+uint32_t
+RdmaHw::GetPeerNodeIdOfNic(uint32_t nicIdx)
+{
+    if (nicIdx >= m_nic.size() || !m_nic[nicIdx].dev)
+        return UINT32_MAX;
+    Ptr<Channel> ch = m_nic[nicIdx].dev->GetChannel();
+    if (!ch)
+        return UINT32_MAX;
+    for (std::size_t i = 0; i < ch->GetNDevices(); i++)
+    {
+        Ptr<NetDevice> d = ch->GetDevice(i);
+        if (d != m_nic[nicIdx].dev && d->GetNode())
+            return d->GetNode()->GetId();
+    }
+    return UINT32_MAX;
+}
+
+uint16_t
+RdmaHw::LookupTelemetryIdx(const std::vector<std::pair<uint16_t, uint16_t>>* idx,
+                            uint16_t switchId)
+{
+    if (!idx)
+        return TelemetryHeader::NO_INDEX;
+    // Sorted by switch id and short (one entry per real switch on the flow's
+    // DAG), so a linear scan over one or two cache lines beats hashing.
+    for (const auto& e : *idx)
+    {
+        if (e.first == switchId)
+            return e.second;
+        if (e.first > switchId)
+            break;
+    }
+    return TelemetryHeader::NO_INDEX;
+}
+
+bool
+RdmaHw::BuildTelemetryHeader(const std::vector<uint16_t>& path,
+                              const std::vector<std::pair<uint16_t, uint16_t>>* idx,
+                              uint8_t l4Proto,
+                              TelemetryHeader& out)
+{
+    // path is the complete path [firstSwitch, ..., dstHost]; the trailing
+    // destination host gets no field, so numFields == path.size() - 1 and the
+    // last field belongs to the last switch, which is the one that resolves
+    // the final segment. Field k lines up with path position k, which is what
+    // makes ch.tel.idx[ch.srh.ptr] the reading switch's own index.
+    if (!idx || idx->empty() || path.size() < 2)
+        return false;
+    if (path.size() - 1 > TelemetryHeader::maxHops)
+        return false; // cannot happen while maxHops == SrHeader::maxSegments
+    out.SetNextHeader(l4Proto);
+    out.SetNumFields(static_cast<uint8_t>(path.size() - 1));
+    for (size_t k = 0; k + 1 < path.size(); k++)
+        out.SetField(static_cast<uint8_t>(k), LookupTelemetryIdx(idx, path[k]));
+    return true;
+}
+
 Ptr<Packet> RdmaHw::GenDataPacket(Ptr<RdmaQueuePair> qp, uint32_t pkt_size, bool recordExpectedHits)
 {
     Ptr<Packet> p = Create<Packet>(pkt_size);
@@ -1157,8 +1275,12 @@ Ptr<Packet> RdmaHw::GenDataPacket(Ptr<RdmaQueuePair> qp, uint32_t pkt_size, bool
     uint8_t l4Proto = 0x11;
     if (m_sourceRouting && !m_sourceRouteCb.IsNull())
     {
+        // Hand the path builder the switch this packet will ACTUALLY land on --
+        // the far end of the NIC GetNicIdxOfQp picks -- so path[0] is true rather
+        // than sampled. On a dual-ToR topology the two differ about half the time.
         std::vector<uint16_t> path =
-            m_sourceRouteCb(IpToNodeId(qp->sip.Get()), IpToNodeId(qp->dip.Get()));
+            m_sourceRouteCb(IpToNodeId(qp->sip.Get()), IpToNodeId(qp->dip.Get()),
+                            GetPeerNodeIdOfNic(GetNicIdxOfQp(qp)));
         if (!path.empty())
         {
             // Record against the real protocol (0x11) before it's possibly
@@ -1174,12 +1296,49 @@ Ptr<Packet> RdmaHw::GenDataPacket(Ptr<RdmaQueuePair> qp, uint32_t pkt_size, bool
                                         qp->dport,
                                         l4Proto);
             }
-            std::vector<uint16_t> segs(path.begin() + 1, path.end());
-            if (!segs.empty())
+            // The segment list now carries the FULL path, first hop included, so every
+                // switch can identify itself as segs[ptr-1]. ptr therefore starts at 1:
+                // at 0 the first switch would read its own id, which is not in its
+                // neighbour table, and drop the packet.
+                std::vector<uint16_t> segs(path.begin(), path.end());
+            if (segs.size() >= 2)
             {
+                // Telemetry goes on first so it ends up *between* the SRH and
+                // the real L4 header: AddHeader prepends, and the SRH must stay
+                // immediately after the IPv4 header (the switch fast paths find
+                // it at a hard-coded offset).
+                uint8_t inner = l4Proto;
+                if (m_telemetryFlowIndex)
+                {
+                    // The header is attached even for the sizing-only packet
+                    // (recordExpectedHits == false, see the m_mtu call in
+                    // AddQueuePair): that packet exists to measure how big a
+                    // full-MTU packet is for the token bucket, so it has to
+                    // carry the same bytes a real one would. Only the
+                    // *counters* are gated, because it is never transmitted
+                    // and no switch will ever see it.
+                    TelemetryHeader tel;
+                    if (BuildTelemetryHeader(path, qp->m_telIdx, inner, tel))
+                    {
+                        p->AddHeader(tel);
+                        inner = TelemetryHeader::PROTO_NUMBER;
+                        if (recordExpectedHits)
+                            m_telemetryStamped++;
+                    }
+                    else if (recordExpectedHits)
+                    {
+                        m_telemetryUnstamped++;
+                        if (!qp->m_telIdx)
+                            m_telemetryMisses[FlowKey5Tuple{qp->sip.Get(),
+                                                            qp->dip.Get(),
+                                                            qp->sport,
+                                                            qp->dport,
+                                                            l4Proto}]++;
+                    }
+                }
                 SrHeader srh;
-                srh.SetNextHeader(l4Proto);
-                srh.SetPtr(0);
+                srh.SetNextHeader(inner);
+                srh.SetPtr(1);
                 srh.SetSegments(segs);
                 p->AddHeader(srh);
                 l4Proto = SrHeader::PROTO_NUMBER;

@@ -12,6 +12,7 @@
 #include "ppp-header.h"
 #include "ns3/int-header.h"
 #include "ns3/sr-header.h"
+#include "ns3/telemetry-header.h"
 #include "ns3/simulator.h"
 #include <cmath>
 
@@ -61,6 +62,13 @@ TypeId SwitchNode::GetTypeId (void)
             BooleanValue(false),
             MakeBooleanAccessor(&SwitchNode::m_packetSpraying),
             MakeBooleanChecker())
+    .AddAttribute("TelemetryCounterCount",
+            "Number of per-flow telemetry counters this switch allocates (N_s). "
+            "Non-zero enables counting: the switch increments "
+            "counter[tel.idx[srh.ptr]] for every source-routed packet it sees",
+            UintegerValue(0),
+            MakeUintegerAccessor(&SwitchNode::SetTelemetryCounterCount),
+            MakeUintegerChecker<uint32_t>())
     .AddAttribute("SourceRouting",
             "Set to true to forward purely by the packet's Source Routing Header, bypassing ECMP/spraying",
             BooleanValue(false),
@@ -71,6 +79,12 @@ TypeId SwitchNode::GetTypeId (void)
 }
 
 SwitchNode::SwitchNode(){
+	m_telemetryCounting = false;
+	m_telemetryNoIndex = 0;
+	m_telemetryOutOfRange = 0;
+	m_telemetryNoHeader = 0;
+	m_srPtrOutOfRange = 0;
+	m_srSelfMismatch = 0;
 	m_ecmpSeed = m_id;
     m_rand = CreateObject<UniformRandomVariable>();
 	m_node_type = 1;
@@ -96,6 +110,15 @@ int SwitchNode::GetOutDev(Ptr<const Packet> p, CustomHeader &ch){
 	// local port number.
 
 	if (m_sourceRouting && ch.srh.present){
+		// segs is a fixed array of SrHeader::maxSegments and ptr arrives off the
+		// wire as a uint8, so an oversized or corrupted ptr would read past the
+		// array into whatever follows it in CustomHeader. Drop instead: a garbage
+		// value can collide with a real neighbour's node id and be forwarded,
+		// which turns one bad packet into a forwarding loop.
+		if (ch.srh.ptr >= SrHeader::maxSegments || ch.srh.ptr >= ch.srh.numSegments){
+			m_srPtrOutOfRange++;
+			return -1;
+		}
 		auto it = m_srNextHop.find(ch.srh.segs[ch.srh.ptr]);
 		if (it == m_srNextHop.end())
 			return -1; // segment doesn't name a direct neighbor of this switch
@@ -155,7 +178,56 @@ void SwitchNode::CheckAndSendResume(uint32_t inDev, uint32_t qIndex){
     }
 }
 
+void SwitchNode::SetTelemetryCounterCount(uint32_t n){
+	m_telemetryCounters.assign(n, 0);
+	m_telemetryCounting = (n > 0);
+}
+
+// Counts this packet against its flow's index at THIS switch. ch.srh.ptr is
+// this switch's own position in the packet's full path on ingress -- GetOutDev
+// consults segs[ptr] and only SendToDev advances it afterwards -- so
+// tel.idx[srh.ptr] is this switch's own field, reachable with one array access
+// and no search. Counted before admission control so it matches the host-side
+// oracle's "expected to traverse" semantics rather than "successfully
+// forwarded".
+void SwitchNode::CountTelemetry(CustomHeader &ch){
+	if (!ch.srh.present){
+		return; // not source-routed: no ptr with which to index the fields
+	}
+	if (!ch.tel.present){
+		m_telemetryNoHeader++;
+		return;
+	}
+	// The segment list carries the full path and ptr starts at 1, so this switch
+	// sits at path position ptr-1 and its own telemetry field is idx[ptr-1].
+	// Its own node id is segs[ptr-1], which lets it verify the header really
+	// describes the route the packet took -- a mismatch means the path the
+	// sender predicted is not the one the packet is on.
+	if (ch.srh.ptr < 1 || ch.srh.ptr > TelemetryHeader::maxHops ||
+		ch.srh.ptr - 1 >= ch.tel.numFields){
+		m_telemetryOutOfRange++;
+		return;
+	}
+	const uint8_t myPos = ch.srh.ptr - 1;
+	if (ch.srh.segs[myPos] != GetId()){
+		m_srSelfMismatch++;
+	}
+	const uint16_t v = ch.tel.idx[myPos];
+	if (v == TelemetryHeader::NO_INDEX){
+		m_telemetryNoIndex++;
+		return;
+	}
+	if (v >= m_telemetryCounters.size()){
+		m_telemetryOutOfRange++;
+		return;
+	}
+	m_telemetryCounters[v]++;
+}
+
 void SwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch){
+	if (m_telemetryCounting){
+		CountTelemetry(ch);
+	}
 	int idx = GetOutDev(p, ch);
 	if (idx >= 0){
 		NS_ASSERT_MSG(m_devices[idx]->IsLinkUp(), "The routing table look up should return link that is up");
@@ -285,22 +357,28 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
 	}
 	if (1){
 		uint8_t* buf = p->GetBuffer();
-		// Locate the UDP header, skipping over the SRH when source routing
-		// put one there. Without this, a source-routed UDP packet's IP
-		// protocol byte reads as SrHeader::PROTO_NUMBER (not 0x11) and this
-		// whole block would silently stop firing, breaking HPCC/PINT INT
-		// telemetry (cc_mode 3/10) for source-routed traffic.
+		// Locate the UDP header, walking the extension-header chain that
+		// source routing and telemetry put between the IPv4 and L4 headers.
+		// Without this, such a packet's IP protocol byte reads as a sentinel
+		// (not 0x11) and this whole block silently stops firing, breaking
+		// HPCC/PINT INT telemetry (cc_mode 3/10) for that traffic. Each
+		// header's own nextHeader byte, at its first byte, names what follows.
 		uint32_t udpOffset = PppHeader::GetStaticSize() + 20; // right after ppp+ip
 		bool isUdp = false;
-		if (buf[PppHeader::GetStaticSize() + 9] == 0x11){ // udp packet, no SRH
+		uint8_t nextProto = buf[PppHeader::GetStaticSize() + 9];
+		if (nextProto == 0x11){ // plain udp, no extension headers
 			isUdp = true;
-		} else if (m_sourceRouting && buf[PppHeader::GetStaticSize() + 9] == SrHeader::PROTO_NUMBER
-				&& buf[udpOffset] == 0x11){ // source-routed udp packet: SRH's own nextHeader byte
-			isUdp = true;
+		} else if (m_sourceRouting && nextProto == SrHeader::PROTO_NUMBER){
+			nextProto = buf[udpOffset]; // the SRH's own nextHeader
 			udpOffset += SrHeader::GetStaticSize();
+			if (nextProto == TelemetryHeader::PROTO_NUMBER){
+				nextProto = buf[udpOffset]; // the telemetry header's own nextHeader
+				udpOffset += TelemetryHeader::GetStaticSize();
+			}
+			isUdp = (nextProto == 0x11);
 		}
 		if (isUdp){
-			IntHeader *ih = (IntHeader*)&buf[udpOffset + 8 + 6]; // ppp, ip, (srh), udp, SeqTs, INT
+			IntHeader *ih = (IntHeader*)&buf[udpOffset + 8 + 6]; // ppp, ip, (srh), (tel), udp, SeqTs, INT
 			Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(m_devices[ifIndex]);
 			if (m_ccMode == 3){ // HPCC
 				ih->PushHop(Simulator::Now().GetTimeStep(), m_txBytes[ifIndex], dev->GetQueue()->GetNBytesTotal(), dev->GetDataRate().GetBitRate());
