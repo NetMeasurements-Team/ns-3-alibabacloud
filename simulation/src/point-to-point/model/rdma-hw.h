@@ -128,17 +128,12 @@ class RdmaHw : public Object
                MessageCompleteCallback message_cb);
     /**
      * Get the lookup key for m_qpMap
-     * @param dip
-     * @param sport
-     * @param pg
-     * @return
      */
-    static uint64_t GetQpKey(uint32_t dip,
-                             uint16_t sport,
-                             uint16_t pg);
+    static uint64_t GetQpKey(uint32_t dip, uint16_t sport, uint16_t pg);
     Ptr<RdmaQueuePair> GetQp(uint32_t dip, uint16_t sport, uint16_t pg);
     uint32_t GetNicIdxOfQp(Ptr<RdmaQueuePair> qp);
-    Ptr<QbbNetDevice> GetNicOfQp(Ptr<RdmaQueuePair> qp) {
+    Ptr<QbbNetDevice> GetNicOfQp(Ptr<RdmaQueuePair> qp)
+    {
         return m_nic[GetNicIdxOfQp(qp)].dev;
     }
     Ptr<RdmaQueuePair> AddQueuePair(uint32_t src,
@@ -176,7 +171,7 @@ class RdmaHw : public Object
     /**
      * Handle both ACK and NACK
      */
-    int ReceiveAck(Ptr<Packet> p, CustomHeader& ch); // handle both ACK and NACK
+    int ReceiveAck(Ptr<Packet> p, CustomHeader& ch);
     /**
      * Callback function that the QbbNetDevice should use when receive packets.
      * Only NIC can call this function. And do not call this upon PFC.
@@ -206,13 +201,22 @@ class RdmaHw : public Object
     void RecvComplete(Ptr<RdmaRxQueuePair> rxQp);
     void SendComplete(Ptr<RdmaQueuePair> qp);
 
+    /**
+     * Continuous-flow (NCCL-like) message bookkeeping on the sender side:
+     *  1. pending  -> in-flight once a message is fully sent (fires send_cb)
+     *  2. in-flight -> done once a message is fully ACKed (fires message_cb)
+     * Messages are sent back-to-back without waiting for the previous one's ACK.
+     */
+    void CheckMessageCompletion(Ptr<RdmaQueuePair> qp);
+
     // call this function after the NIC is setup
     void AddTableEntry(Ipv4Address& dstAddr, uint32_t intf_idx, bool is_nvswitch);
     void ClearTable();
     void RedistributeQp();
 
     /**
-     * Get the next packet to send, inc snd_nxt
+     * Get the next packet to send, inc snd_nxt.
+     * Never lets a packet straddle two messages. Returns nullptr if nothing is left.
      */
     Ptr<Packet> GetNxtPacket(Ptr<RdmaQueuePair> qp);
     Ptr<Packet> GenDataPacket(Ptr<RdmaQueuePair> qp, uint32_t pkt_size);

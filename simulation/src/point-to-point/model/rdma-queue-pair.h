@@ -8,6 +8,8 @@
 #include <ns3/object.h>
 #include <ns3/packet.h>
 
+#include <deque>
+#include <map>
 #include <mutex>
 #include <queue>
 #include <vector>
@@ -58,12 +60,19 @@ class RdmaQueuePair : public Object
     void SetAppNotifyCallback(Callback<void> notifyAppFinish);
     void SetAppSentCallback(Callback<void> notifyAppSent);
 
+    /**
+     * \brief Bytes left to send from snd_nxt to the end of ALL queued messages
+     * (pending and in-flight). Spans message boundaries; GetNxtPacket caps it.
+     */
     uint64_t GetBytesLeft();
     uint32_t GetSrc();
     uint32_t GetDest();
     void SetSrc(uint32_t src);
     void SetDest(uint32_t dest);
     uint32_t GetHash(void);
+    /**
+     * \brief Cumulative ACK. Returns true if snd_una advanced (used to re-arm the RTO).
+     */
     bool Acknowledge(uint64_t ack);
     uint64_t GetOnTheFly();
     bool IsWinBound();
@@ -72,7 +81,7 @@ class RdmaQueuePair : public Object
      */
     uint64_t GetWin();
     /**
-     * \brief check if there are no more messages to send
+     * \brief Check if there is no more message to send AND no message in flight
      */
     bool IsFinished();
     void UpdateRate();
@@ -109,7 +118,7 @@ class RdmaQueuePair : public Object
     TokenBucket m_tokenBucket;
 
     /***********
-     * messages
+     * messages - dual queue system for pipelining (continuous flow)
      **********/
     class RdmaMessage {
     public:
@@ -117,21 +126,70 @@ class RdmaQueuePair : public Object
         uint64_t m_startSeq;
         uint64_t m_flow_id;
         uint64_t m_tag;
-        /** prevents triggering SendComplete callback multiple times in case of retransmissions */
+        /** true when all packets have been transmitted (reset on recovery) */
         bool m_sent = false;
+        /** prevents triggering the SendComplete callback multiple times in case of retransmissions */
+        bool m_appNotified = false;
         Callback<void> m_notifyAppFinish;
         Callback<void> m_notifyAppSent;
     };
-    std::queue<RdmaMessage> m_messages;
+
+    /**
+     * \brief Messages that are being sent or waiting to be sent.
+     * Front message is the one currently being transmitted.
+     * Each message has m_startSeq calculated at push time.
+     */
+    std::deque<RdmaMessage> m_pendingMessages;
+
+    /**
+     * \brief Messages that have been fully sent but not yet ACKed.
+     * Kept for triggering the finish callback when ACKed and for retransmission
+     * on NACK/RTO. Ordered by sequence number (oldest first).
+     */
+    std::deque<RdmaMessage> m_inFlightMessages;
+
     std::mutex m_mutex;
     Time m_lastMessageStartTime;
+
+    /**
+     * \brief Push a new message to the pending queue. Its start sequence is the
+     * end of the last pending/in-flight message, so messages are back to back.
+     */
     void PushMessage(uint64_t size,
                      uint64_t flow_id,
                      uint64_t tag,
                      Callback<void> notifyAppFinish,
                      Callback<void> notifyAppSent);
+
+    /**
+     * \brief Called when the last packet of the front pending message is sent.
+     * Moves the message from the pending to the in-flight queue.
+     * \return The message that was moved (for callback purposes)
+     */
+    RdmaMessage MoveCurrentToInFlight();
+
+    /**
+     * \brief Called when the oldest in-flight message is fully ACKed.
+     * Removes it from the in-flight queue and triggers its finish callback.
+     */
     void FinishMessage();
-    bool IsCurMessageFinished();
+
+    /**
+     * \brief True if the front pending message has been fully sent
+     * (snd_nxt >= m_startSeq + m_size).
+     */
+    bool IsCurMessageFullySent();
+
+    /**
+     * \brief True if the oldest in-flight message is fully ACKed
+     * (snd_una >= m_startSeq + m_size).
+     */
+    bool IsOldestInFlightAcked();
+
+    /**
+     * \brief End sequence number over all pending and in-flight messages.
+     */
+    uint64_t GetTotalEndSeq();
 };
 
 class RdmaRxQueuePair : public Object

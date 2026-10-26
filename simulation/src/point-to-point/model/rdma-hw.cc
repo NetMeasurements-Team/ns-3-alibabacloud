@@ -3,6 +3,7 @@
 #include "cn-header.h"
 #include "ppp-header.h"
 #include "qbb-header.h"
+#include "rdma-queue-pair.h"
 
 #include "ns3/boolean.h"
 #include "ns3/data-rate.h"
@@ -17,6 +18,7 @@
 #ifdef NS3_MTP
 #include "ns3/mtp-interface.h"
 #endif
+#include <deque>
 #include <iostream> // debug
 
 namespace ns3
@@ -261,7 +263,8 @@ RdmaHw::AddQueuePair(uint32_t src,
     qp->SetAppNotifyCallback(notifyAppFinish);
     qp->SetAppSentCallback(notifyAppSent);
 
-    if (size != 0) {
+    if (size != 0)
+    {
         qp->PushMessage(size, 0, 0, notifyAppFinish, notifyAppSent);
     }
 
@@ -280,7 +283,6 @@ RdmaHw::AddQueuePair(uint32_t src,
     DataRate m_bps = m_nic[nic_idx].dev->GetDataRate();
     qp->m_rate = m_bps;
     qp->m_max_rate = m_bps;
-
 
     Ptr<Packet> mtuPacket = GenDataPacket(qp, m_mtu);
     qp->m_tokenBucket.Init(
@@ -320,7 +322,8 @@ void
 RdmaHw::QpStartCC(Ptr<RdmaQueuePair> qp)
 {
     TypeId congTypeId;
-    switch (m_cc_mode) {
+    switch (m_cc_mode)
+    {
     case 1:
         congTypeId = MellanoxDcqcn::GetTypeId();
         break;
@@ -346,30 +349,32 @@ RdmaHw::QpStartCC(Ptr<RdmaQueuePair> qp)
         congTypeId = HpccEcn::GetTypeId();
         break;
     default:
-        NS_FATAL_ERROR(
-            "cc_mode" << m_cc_mode << " can not match any CongestionTypeId");
+        NS_FATAL_ERROR("cc_mode" << m_cc_mode << " can not match any CongestionTypeId");
         break;
     }
 
     uint32_t nic_idx = GetNicIdxOfQp(qp);
 
     bool createAlgo = false;
-    if (m_nic_coalesce_method == NicCoalesceMethod::PER_QP) {
+    if (m_nic_coalesce_method == NicCoalesceMethod::PER_QP)
+    {
         ObjectFactory congestionAlgorithmFactory;
         congestionAlgorithmFactory.SetTypeId(congTypeId);
         Ptr<RdmaCongestionOps> algo = congestionAlgorithmFactory.Create<RdmaCongestionOps>();
         qp->m_congestionControl = algo;
         createAlgo = true;
-    } else if (m_nic_coalesce_method == NicCoalesceMethod::PER_IP) {
+    }
+    else if (m_nic_coalesce_method == NicCoalesceMethod::PER_IP)
+    {
         auto& mp = m_nic_peripTable[nic_idx];
-        if (mp.find(qp->dip.Get()) == mp.end()) {
+        if (mp.find(qp->dip.Get()) == mp.end())
+        {
             // Create new tableEntry
             mp[qp->dip.Get()] = CreateObject<NicPerIpTableEntry>();
 
             ObjectFactory congestionAlgorithmFactory;
             congestionAlgorithmFactory.SetTypeId(congTypeId);
-            Ptr<RdmaCongestionOps> algo =
-                congestionAlgorithmFactory.Create<RdmaCongestionOps>();
+            Ptr<RdmaCongestionOps> algo = congestionAlgorithmFactory.Create<RdmaCongestionOps>();
             mp[qp->dip.Get()]->m_congestionControl = algo;
             createAlgo = true;
         }
@@ -377,11 +382,14 @@ RdmaHw::QpStartCC(Ptr<RdmaQueuePair> qp)
         mp[qp->dip.Get()]->qpNum++;
     }
 
-    if (createAlgo) {
+    if (createAlgo)
+    {
         qp->m_congestionControl->SetHw(this, m_nic[nic_idx].dev);
         qp->m_congestionControl->LazyInit(qp, qp->m_rate);
-        if(!m_cc_configs.empty()){
-            for(auto& cc_config : m_cc_configs){
+        if (!m_cc_configs.empty())
+        {
+            for (auto& cc_config : m_cc_configs)
+            {
                 qp->m_congestionControl->SetAttribute(cc_config.first, *(cc_config.second));
             }
             m_cc_configs.clear();
@@ -402,10 +410,9 @@ RdmaHw::QpStopCC(Ptr<RdmaQueuePair> qp)
     else if (m_nic_coalesce_method == NicCoalesceMethod::PER_IP)
     {
         m_nic_peripTable[nic_idx][qp->dip.Get()]->qpNum--;
-        if(m_nic_peripTable[nic_idx][qp->dip.Get()]->qpNum == 0)
+        if (m_nic_peripTable[nic_idx][qp->dip.Get()]->qpNum == 0)
         {
             // No qp exists
-            // std::cout<<"No qp exists, so delete the ip "<<qp->dip.Get()<<" from nic "<<nic_idx<<std::endl;
             m_nic_peripTable[nic_idx][qp->dip.Get()]->m_congestionControl->AllComplete();
             m_nic_peripTable[nic_idx].erase(qp->dip.Get());
         }
@@ -449,9 +456,7 @@ RdmaHw::GetRxQp(uint32_t sip,
 uint32_t
 RdmaHw::GetNicIdxOfRxQp(Ptr<RdmaRxQueuePair> q)
 {
-    // BUG就出现在这里了，首先要判断m_rtTable[q->dip]是否存在，若不存在就去判断m_rtTable_nxthop_nvswitch是否存在，如果都不存在，那么就输出错误
-    // auto &v = m_rtTable[q->dip];
-
+    // Check m_rtTable first, then m_rtTable_nxthop_nvswitch; error if neither has a route.
     if (m_rtTable.count(q->dip) != 0)
     {
         auto& v = m_rtTable[q->dip];
@@ -481,6 +486,7 @@ RdmaHw::GetNicIdxOfRxQp(Ptr<RdmaRxQueuePair> q)
         NS_ASSERT_MSG(false, "We assume at least one NIC is alive");
     }
     NS_ASSERT_MSG(false, "We assume at least one NIC is alive");
+    return 0;
 }
 
 void
@@ -490,39 +496,88 @@ RdmaHw::DeleteRxQp(uint32_t dip, uint16_t pg, uint16_t dport)
     m_rxQpMap.erase(key);
 }
 
+/* ---------------------------------------------------------------------------
+ * Continuous flow (ported from GitLab)
+ * ------------------------------------------------------------------------- */
+void
+RdmaHw::CheckMessageCompletion(Ptr<RdmaQueuePair> qp)
+{
+    // STEP 1: Move fully-sent messages from PENDING -> IN-FLIGHT.
+    // Fires the send-complete callback (once per message, even across retransmissions).
+    while (qp->IsCurMessageFullySent())
+    {
+        NS_ASSERT(!m_sendCompleteCallback.IsNull());
+        if (qp->m_pendingMessages.empty())
+        {
+            break;
+        }
+
+        bool needs_notification = !qp->m_pendingMessages.front().m_appNotified;
+        if (needs_notification)
+        {
+            qp->m_pendingMessages.front().m_appNotified = true;
+        }
+
+        RdmaQueuePair::RdmaMessage msg = qp->MoveCurrentToInFlight();
+
+        if (needs_notification)
+        {
+            m_sendCompleteCallback(qp, msg);
+        }
+    }
+
+    // STEP 2: Complete ACKed messages from IN-FLIGHT -> DONE.
+    // Fires the message-complete callback.
+    while (qp->IsOldestInFlightAcked())
+    {
+        if (qp->m_inFlightMessages.empty())
+        {
+            NS_LOG_WARN("CheckMessageCompletion: IsOldestInFlightAcked returned true but queue "
+                        "is empty");
+            break;
+        }
+
+        const RdmaQueuePair::RdmaMessage msg = qp->m_inFlightMessages.front();
+        qp->FinishMessage(); // removes from in-flight and calls the app callback
+
+        if (!m_messageCompleteCallback.IsNull())
+        {
+            m_messageCompleteCallback(qp, msg);
+        }
+    }
+}
+
 int
 RdmaHw::SendPacketComplete(Ptr<Packet> p, CustomHeader& ch)
 {
     uint16_t qIndex = ch.udp.pg;
     uint16_t port = ch.udp.sport;
-    // uint8_t cnp = (ch.flags >> qbbHeader::FLAG_CNP) & 1;
-    // int i;
     Ptr<RdmaQueuePair> qp = GetQp(ch.dip, port, qIndex);
     if (qp == NULL)
     {
         return 0;
     }
-    if (qp->GetBytesLeft() <= 0)
-    {
-        SendComplete(qp);
-    }
+
+    CheckMessageCompletion(qp);
+
     return 0;
 }
 
 void
 RdmaHw::SendComplete(Ptr<RdmaQueuePair> qp)
 {
+    // Only used outside the normal flow; the main logic is in CheckMessageCompletion.
     NS_ASSERT(!m_sendCompleteCallback.IsNull());
-    if (qp->m_messages.empty())
+    if (qp->m_pendingMessages.empty())
     {
         return;
     }
-    RdmaQueuePair::RdmaMessage& msg = qp->m_messages.front();
-    if (!msg.m_sent)
-    {
-        msg.m_sent = true;
-        m_sendCompleteCallback(qp, msg);
-    }
+
+    // Move message from pending to in-flight
+    RdmaQueuePair::RdmaMessage msg = qp->MoveCurrentToInFlight();
+
+    // Trigger the send complete callback
+    m_sendCompleteCallback(qp, msg);
 }
 
 int
@@ -600,14 +655,12 @@ RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader& ch)
 
         newp->AddHeader(head);
         AddHeader(newp, 0x800); // Attach PPP header
-        uint32_t sip = ch.sip;
-        uint32_t sid = (sip >> 8) & 0xffff;
         uint32_t dip = ch.dip;
         uint32_t did = (dip >> 8) & 0xffff;
         // send
         uint32_t nic_idx = GetNicIdxOfRxQp(rxQp);
         m_nic[nic_idx].dev->RdmaEnqueueHighPrioQ(newp);
-        // 发送给目标 NVSwitch 的报文
+        // packets sent to the destination NVSwitch
         if (did == m_node->GetId() && m_node->GetNodeType() == 2 && ch.m_tos == 4)
         {
             m_nic[nic_idx].dev->SwitchAsHostSend();
@@ -617,14 +670,24 @@ RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader& ch)
             m_nic[nic_idx].dev->TriggerTransmit();
         }
     }
-    if (x == 1)
+
+    // Continuous flow: one in-order packet (or a drained out-of-order run) can
+    // complete several back-to-back messages, and completion must also be
+    // detected on in-sequence packets that don't trigger an ACK (x == 5).
+    if (x == 1 || x == 5)
     {
-        NS_ASSERT(!rxQp->m_messages.empty());
-        RdmaRxQueuePair::RdmaMessage msg = rxQp->m_messages.front();
-        if (rxQp->ReceiverNextExpectedSeq == msg.m_startSeq + msg.m_size)
+        while (!rxQp->m_messages.empty())
         {
-            //std::cout << " - it is the last packet" << std::endl;
-            RecvComplete(rxQp);
+            const RdmaRxQueuePair::RdmaMessage& msg = rxQp->m_messages.front();
+            // >= for robustness: if we've received beyond the message end, it's complete
+            if (rxQp->ReceiverNextExpectedSeq >= msg.m_startSeq + msg.m_size)
+            {
+                RecvComplete(rxQp);
+            }
+            else
+            {
+                break;
+            }
         }
     }
     return 0;
@@ -643,16 +706,13 @@ RdmaHw::ReceiveCnp(Ptr<Packet> p, CustomHeader& ch)
         return 0;
     }
     uint16_t udpport = ch.cnp.fid; // corresponds to the sport
-    uint8_t ecnbits = ch.cnp.ecnBits;
-    uint16_t qfb = ch.cnp.qfb;
-    uint16_t total = ch.cnp.total;
 
-    uint32_t i;
     // get qp
     Ptr<RdmaQueuePair> qp = GetQp(ch.sip, udpport, qIndex);
     if (qp == NULL)
     {
         std::cout << "ERROR: QCN NIC cannot find the flow\n";
+        return 0;
     }
     // get nic
     uint32_t nic_idx = GetNicIdxOfQp(qp);
@@ -680,43 +740,46 @@ RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader& ch)
     }
 
     uint32_t nic_idx = GetNicIdxOfQp(qp);
-    Ptr<QbbNetDevice> dev = m_nic[nic_idx].dev;
     if (m_ack_interval == 0)
     {
         std::cout << "ERROR: shouldn't receive ack\n";
     }
     else
     {
-        if (!m_backto0)
+        const bool isNack = (ch.l3Prot == 0xFD);
+
+        // A NACK is obsolete if ACKs have already moved snd_una past its seq.
+        // NOTE: strict '<' on purpose. A NACK with seq == snd_una is the normal
+        // "packet at snd_una was lost" case and must trigger recovery.
+        const bool obsoleteNack = isNack && !m_backto0 && seq < qp->snd_una;
+
+        if (!obsoleteNack)
         {
-            if (qp->Acknowledge(seq))
+            const uint64_t ackSeq = m_backto0 ? seq / m_chunk * m_chunk : seq;
+            if (qp->Acknowledge(ackSeq))
             {
                 InitRto(qp);
             }
-        }
-        else
-        {
-            uint64_t goback_seq = seq / m_chunk * m_chunk;
-            if (qp->Acknowledge(goback_seq))
+
+            // Unified completion check, before recovery:
+            //  - moves any fully-sent messages to in-flight (race with SendPacketComplete)
+            //  - completes any fully-ACKed messages
+            CheckMessageCompletion(qp);
+
+            if (isNack)
             {
-                InitRto(qp);
+                // move unacked in-flight messages back to pending, rewind snd_nxt
+                RecoverQueue(qp);
             }
-        }
-        if (qp->IsCurMessageFinished())
-        {
-            QpCompleteMessage(qp);
-            // if (qp->IsFinished())
-            // {
-            //     QpComplete(qp);
-            // }
-            return 0;
         }
     }
-    if (ch.l3Prot == 0xFD) // NACK
+
+    // The message-complete callback may have torn down the QP (QpComplete nulls
+    // the CC object). Unlike the old code we no longer return early on message
+    // completion, so guard against that here.
+    if (!qp->m_congestionControl)
     {
-        //printf("SEND received NACK for flow %lu (win %u, q->m->len %lu, snd_una %lu, snd_nxt %lu) at %lu\n", qp->m_messages.front().m_flow_id, qp->m_win, qp->m_messages.size(), qp->snd_una, qp->snd_nxt, Simulator::Now().GetTimeStep());
-        // restart from the last unacknowledged sequence
-        RecoverQueue(qp);
+        return 0;
     }
 
     // handle cnp
@@ -739,7 +802,6 @@ RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader& ch)
     {
         m_nic[nic_idx].dev->TriggerTransmit();
     }
-    // std:://cout << "ack triggere transmitted\n";
     return 0;
 }
 
@@ -778,7 +840,7 @@ RdmaHw::ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size, bo
         while (!q->m_outOfSeqPackets.empty())
         {
             const auto nxt = q->m_outOfSeqPackets.begin();
-            uint64_t ooo_seq  = nxt->first;
+            uint64_t ooo_seq = nxt->first;
             uint32_t ooo_size = nxt->second;
             q->m_outOfSeqPackets.erase(nxt);
             if (const int ret = ReceiverCheckSeq(ooo_seq, q, ooo_size, true); ret != 1 && ret != 5)
@@ -827,12 +889,10 @@ RdmaHw::ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size, bo
                 return 3;
             }
         }
-        //printf("RECV out of order and window for flow %lu (win %u, ooo.size %lu, ooo min %u, ooo max %u, q->m->len %lu, seq %lu, expected %lu) at %lu\n", q->m_messages.front().m_flow_id, q->m_win, q->m_outOfSeqPackets.size(), q->m_outOfSeqPackets.begin()->first, q->m_outOfSeqPackets.rbegin()->first, q->m_messages.size(), seq, expected, Simulator::Now().GetTimeStep());
         // Generate NACK
         if (Simulator::Now() >= q->m_nackTimer || q->m_lastNACK != expected)
         {
-            //printf("NACK %lu\n", q->m_messages.front().m_flow_id);
-            q->m_nackTimer = Simulator::Now() + NanoSeconds(m_nack_interval*1000);
+            q->m_nackTimer = Simulator::Now() + NanoSeconds(m_nack_interval * 1000);
             q->m_lastNACK = expected;
             if (m_backto0)
             {
@@ -878,7 +938,61 @@ RdmaHw::EtherToPpp(uint16_t proto)
 void
 RdmaHw::RecoverQueue(Ptr<RdmaQueuePair> qp)
 {
+    // Go-back-N from snd_una across the pending and in-flight message queues.
+    // Called on NACK and on RTO.
+    uint64_t recover_point = qp->snd_una;
+
+    NS_LOG_DEBUG("RecoverQueue: recover_point=" << recover_point << " snd_nxt=" << qp->snd_nxt
+                                                << " pending=" << qp->m_pendingMessages.size()
+                                                << " inflight="
+                                                << qp->m_inFlightMessages.size());
+
+    // Step 1: Save existing pending messages (possibly partially sent).
+    // They are re-appended AFTER the in-flight messages being recovered.
+    std::deque<RdmaQueuePair::RdmaMessage> saved_pending;
+    while (!qp->m_pendingMessages.empty())
+    {
+        RdmaQueuePair::RdmaMessage msg = qp->m_pendingMessages.front();
+        qp->m_pendingMessages.pop_front();
+        msg.m_sent = false;
+        saved_pending.push_back(msg);
+    }
+
+    // Step 2: Move in-flight messages that need retransmission back to pending.
+    // Walk from newest to oldest so push_front keeps the original order.
+    while (!qp->m_inFlightMessages.empty())
+    {
+        RdmaQueuePair::RdmaMessage& msg = qp->m_inFlightMessages.back();
+        uint64_t msgEnd = msg.m_startSeq + msg.m_size;
+
+        if (recover_point < msgEnd)
+        {
+            // has unacked data -> retransmit
+            msg.m_sent = false;
+            qp->m_pendingMessages.push_front(msg);
+            qp->m_inFlightMessages.pop_back();
+        }
+        else
+        {
+            // fully ACKed: keep in in-flight and stop
+            break;
+        }
+    }
+
+    // Step 3: Re-append saved pending messages (original order)
+    for (auto& msg : saved_pending)
+    {
+        qp->m_pendingMessages.push_back(msg);
+    }
+
+    // Reset snd_nxt to snd_una for retransmission
     qp->snd_nxt = qp->snd_una;
+
+    NS_LOG_DEBUG("RecoverQueue done: snd_nxt=" << qp->snd_nxt
+                                               << " pending=" << qp->m_pendingMessages.size()
+                                               << " inflight="
+                                               << qp->m_inFlightMessages.size());
+
     InitRto(qp);
 }
 
@@ -906,7 +1020,6 @@ RdmaHw::QpComplete(Ptr<RdmaQueuePair> qp)
     m_qpCompleteCallback(qp);
 
     qp->m_congestionControl = nullptr;
-    // qp->m_notifyAppFinish();
 
     // delete the qp
     DeleteQueuePair(qp);
@@ -915,8 +1028,6 @@ RdmaHw::QpComplete(Ptr<RdmaQueuePair> qp)
 void
 RdmaHw::RecvComplete(Ptr<RdmaRxQueuePair> rxQp)
 {
-    // qp->m_messages.front().m_notifyAppFinish();
-    // callback
     if (!m_recvCompleteCallback.IsNull())
     {
         const RdmaRxQueuePair::RdmaMessage msg = rxQp->m_messages.front();
@@ -928,25 +1039,21 @@ RdmaHw::RecvComplete(Ptr<RdmaRxQueuePair> rxQp)
 void
 RdmaHw::QpCompleteMessage(Ptr<RdmaQueuePair> qp)
 {
-    // qp->m_messages.front().m_notifyAppFinish();
-    // callback
-    const RdmaQueuePair::RdmaMessage msg = qp->m_messages.front();
-    qp->FinishMessage();
+    // Messages complete from the in-flight queue, not pending.
+    // m_startSeq is fixed when the message is pushed (continuous flow), so there is
+    // no longer any need to rebase the next message's start seq here.
+    if (qp->m_inFlightMessages.empty())
+    {
+        NS_LOG_WARN("QpCompleteMessage called but no in-flight messages");
+        return;
+    }
+
+    const RdmaQueuePair::RdmaMessage msg = qp->m_inFlightMessages.front();
+    qp->FinishMessage(); // removes from in-flight and calls the callback
 
     if (!m_messageCompleteCallback.IsNull())
     {
         m_messageCompleteCallback(qp, msg);
-    }
-    if (!qp->m_messages.empty())
-    {
-        // Have more messages to send
-        // std::cout<<"at "<<Simulator::Now().GetTimeStep()<<"ns, qp src:"<<qp->m_src<<"
-        // dst:"<<qp->m_dest<<" port:"<<qp->sport<<" dport:"<<qp->dport<<" has more messages to
-        // send\n";
-        qp->m_lastMessageStartTime = Simulator::Now();
-        qp->m_messages.front().m_startSeq = qp->snd_nxt;
-        uint32_t nic_idx = GetNicIdxOfQp(qp);
-        m_nic[nic_idx].dev->TriggerTransmit();
     }
 }
 
@@ -1005,6 +1112,41 @@ Ptr<Packet>
 RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp)
 {
     uint64_t payload_size = qp->GetBytesLeft();
+
+    // Never create 0-byte packets
+    if (payload_size == 0)
+    {
+        NS_LOG_DEBUG("GetNxtPacket: no bytes left to send (pending="
+                     << qp->m_pendingMessages.size()
+                     << " inflight=" << qp->m_inFlightMessages.size() << ")");
+        return nullptr;
+    }
+
+    // A single packet must never span two messages. GetBytesLeft() spans all
+    // queued messages, so cap the payload at the end of the message containing
+    // snd_nxt. Back-to-back sending is preserved: the next call immediately
+    // starts the following message without waiting for ACKs.
+    //
+    // snd_nxt is always at or past the end of every in-flight message (messages
+    // only move to in-flight once fully sent, and RecoverQueue resets snd_nxt to
+    // snd_una with only fully-acked messages left in-flight), so the message
+    // containing snd_nxt is always in the pending queue.
+    uint64_t bytesLeftInCurMsg = 0;
+    for (const auto& msg : qp->m_pendingMessages)
+    {
+        const uint64_t msgEnd = msg.m_startSeq + msg.m_size;
+        if (msgEnd > qp->snd_nxt)
+        {
+            bytesLeftInCurMsg = msgEnd - qp->snd_nxt;
+            break;
+        }
+    }
+
+    if (bytesLeftInCurMsg != 0 && bytesLeftInCurMsg < payload_size)
+    {
+        payload_size = bytesLeftInCurMsg;
+    }
+
     if ((uint64_t)m_mtu < payload_size)
     {
         payload_size = m_mtu;
@@ -1013,8 +1155,6 @@ RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp)
 
     // update state
     qp->snd_nxt += payload_size;
-    // std::cout << "current snd_nxt is: " << qp->snd_nxt << ", the window is: " << qp->m_win <<
-    // std::endl;
     qp->m_ipid++;
 
     // This will trigger retransmission in case the packet is not acknowledged in time
@@ -1023,37 +1163,39 @@ RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp)
         InitRto(qp);
     }
 
-    // return
     return p;
 }
 
-void RdmaHw::InitRto(Ptr<RdmaQueuePair> qp)
+void
+RdmaHw::InitRto(Ptr<RdmaQueuePair> qp)
 {
+    // NOTE: condition kept exactly as in the GitHub version. It looks inverted
+    // (the timer is armed when EnableRto is *false*), see porting notes.
     if (!m_enable_rto)
     {
-        // if (qp->m_rtoEvent.IsRunning())
-        // {
         qp->m_rtoEvent.Cancel();
-        // }
-        if (/*qp->GetBytesLeft() > 0 ||*/ qp->m_baseRtt > 0 && qp->snd_nxt > qp->snd_una)
+        if (qp->m_baseRtt > 0 && qp->snd_nxt > qp->snd_una)
         {
             // FIXME determine proper timeout value
-            qp->m_rtoEvent = Simulator::Schedule(NanoSeconds(30 * qp->m_baseRtt), &RdmaHw::RtoHandler, this, qp);
+            qp->m_rtoEvent =
+                Simulator::Schedule(NanoSeconds(30 * qp->m_baseRtt), &RdmaHw::RtoHandler, this, qp);
         }
     }
 }
 
-void RdmaHw::RtoHandler(Ptr<RdmaQueuePair> qp)
+void
+RdmaHw::RtoHandler(Ptr<RdmaQueuePair> qp)
 {
-    if (qp->snd_nxt > qp->snd_una) {  // still have unacked data
-        //printf("RtoHandler RecoverQueue for %u -> %u, flow_id %lu, left %lu, snd_nxt %lu, snd_una %lu, %lu\n", qp->m_src, qp->m_dest, qp->m_messages.front().m_flow_id, qp->GetBytesLeft(), qp->snd_nxt, qp->snd_una, Simulator::Now().GetTimeStep());
-        RecoverQueue(qp);  // reset snd_nxt = snd_una
+    if (qp->snd_nxt > qp->snd_una)
+    { // still have unacked data
+        RecoverQueue(qp); // go-back-N across message queues, snd_nxt = snd_una
         uint32_t nic_idx = GetNicIdxOfQp(qp);
         m_nic[nic_idx].dev->TriggerTransmit();
     }
 }
 
-Ptr<Packet> RdmaHw::GenDataPacket(Ptr<RdmaQueuePair> qp, uint32_t pkt_size)
+Ptr<Packet>
+RdmaHw::GenDataPacket(Ptr<RdmaQueuePair> qp, uint32_t pkt_size)
 {
     Ptr<Packet> p = Create<Packet>(pkt_size);
     // add SimpleSeqTsHeader
@@ -1174,15 +1316,22 @@ RdmaHw::PrintHostBW(FILE* bw_output, uint32_t bw_mon_interval)
 void
 RdmaHw::PrintQPRate(FILE* rate_output)
 {
-    std::unordered_map<uint64_t, Ptr<RdmaQueuePair>>::iterator it = m_qpMap.begin();
-    for (; it != m_qpMap.end(); it++)
+    for (auto it = m_qpMap.begin(); it != m_qpMap.end(); it++)
     {
         Ptr<RdmaQueuePair> qp = it->second;
         uint64_t key = it->first;
-        // if (qp->m_rate.GetBitRate() == last_qp_rate[key])
-        // {
-        //     continue;
-        // }
+
+        // message info from either pending or in-flight queue
+        uint64_t startSeq = 0;
+        if (!qp->m_pendingMessages.empty())
+        {
+            startSeq = qp->m_pendingMessages.front().m_startSeq;
+        }
+        else if (!qp->m_inFlightMessages.empty())
+        {
+            startSeq = qp->m_inFlightMessages.front().m_startSeq;
+        }
+
         fprintf(rate_output,
                 "%lu, %u, %u, %u, %u, %lu, %lu\n",
                 Simulator::Now().GetTimeStep(),
@@ -1190,7 +1339,7 @@ RdmaHw::PrintQPRate(FILE* rate_output)
                 qp->m_dest,
                 qp->sport,
                 qp->dport,
-                qp->snd_nxt - qp->m_messages.front().m_startSeq,
+                qp->snd_nxt - startSeq,
                 qp->m_rate.GetBitRate());
         fflush(rate_output);
         last_qp_rate[key] = qp->m_rate.GetBitRate();
@@ -1204,13 +1353,23 @@ RdmaHw::PrintQPRate(FILE* rate_output)
 void
 RdmaHw::PrintQPCnpNumber(FILE* cnp_output)
 {
-    std::unordered_map<uint64_t, Ptr<RdmaQueuePair>>::iterator it = m_qpMap.begin();
-    for (; it != m_qpMap.end(); it++)
+    for (auto it = m_qpMap.begin(); it != m_qpMap.end(); it++)
     {
         Ptr<RdmaQueuePair> qp = it->second;
         uint64_t key = it->first;
         if (qp_cnp[key] != last_qp_cnp[key])
         {
+            // message size from either pending or in-flight queue
+            uint64_t msgSize = 0;
+            if (!qp->m_pendingMessages.empty())
+            {
+                msgSize = qp->m_pendingMessages.front().m_size;
+            }
+            else if (!qp->m_inFlightMessages.empty())
+            {
+                msgSize = qp->m_inFlightMessages.front().m_size;
+            }
+
             fprintf(cnp_output,
                     "%lu, %u, %u, %u, %u, %lu, %u\n",
                     Simulator::Now().GetTimeStep(),
@@ -1218,7 +1377,7 @@ RdmaHw::PrintQPCnpNumber(FILE* cnp_output)
                     qp->m_dest,
                     qp->sport,
                     qp->dport,
-                    qp->m_messages.front().m_size,
+                    msgSize,
                     qp_cnp[key]);
             fflush(cnp_output);
             last_qp_cnp[key] = qp_cnp[key];

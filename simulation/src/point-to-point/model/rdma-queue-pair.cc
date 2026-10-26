@@ -81,7 +81,6 @@ void
 RdmaQueuePair::SetWin(uint32_t win)
 {
     m_win = win;
-    // std::cout << "set win: " << m_win << std::endl;
 }
 
 void
@@ -109,41 +108,33 @@ RdmaQueuePair::SetAppSentCallback(Callback<void> notifyAppSent)
 }
 
 uint64_t
-RdmaQueuePair::GetBytesLeft()
+RdmaQueuePair::GetTotalEndSeq()
 {
-    if (m_messages.empty())
+    // End sequence considering both pending and in-flight messages
+    uint64_t endSeq = snd_nxt;
+
+    if (!m_inFlightMessages.empty())
     {
-        return 0;
+        const RdmaMessage& lastInFlight = m_inFlightMessages.back();
+        endSeq = std::max(endSeq, lastInFlight.m_startSeq + lastInFlight.m_size);
     }
-    uint64_t size = m_messages.front().m_size + m_messages.front().m_startSeq;
-    uint64_t actual_size = 0;
-    if (size >= snd_nxt)
+
+    if (!m_pendingMessages.empty())
     {
-        actual_size = size - snd_nxt;
+        const RdmaMessage& lastPending = m_pendingMessages.back();
+        endSeq = std::max(endSeq, lastPending.m_startSeq + lastPending.m_size);
     }
-    return actual_size;
+
+    return endSeq;
 }
 
-void
-RdmaRxQueuePair::PushMessage(
-    uint64_t size,
-    uint64_t flow_id,
-    uint64_t tag)
+uint64_t
+RdmaQueuePair::GetBytesLeft()
 {
-    // TODO does this need to be guarded?
-    RdmaMessage msg;
-    msg.m_size = size;
-    msg.m_flow_id = flow_id;
-    msg.m_tag = tag;
-    if (m_messages.empty())
-    {
-        msg.m_startSeq = ReceiverNextExpectedSeq;
-    }
-    else
-    {
-        msg.m_startSeq = m_messages.back().m_startSeq + m_messages.back().m_size;
-    }
-    m_messages.push(msg);
+    // Total bytes left to send from snd_nxt, across pending AND in-flight
+    // messages (in-flight matters during recovery, when snd_nxt is rewound).
+    const uint64_t totalEnd = GetTotalEndSeq();
+    return totalEnd > snd_nxt ? totalEnd - snd_nxt : 0;
 }
 
 uint32_t
@@ -172,9 +163,11 @@ RdmaQueuePair::Acknowledge(uint64_t ack)
     if (ack > snd_una)
     {
         snd_una = ack;
+        // If the cumulative ACK jumps ahead of our sending counter (RTO / go-back-N),
+        // pull snd_nxt forward so pending messages can be moved to in-flight.
         if (snd_nxt < snd_una)
         {
-            snd_nxt = snd_una;  // needed because of the Rto mechanism
+            snd_nxt = snd_una;
         }
         return true;
     }
@@ -186,7 +179,20 @@ RdmaQueuePair::GetOnTheFly()
 {
     if (snd_nxt < snd_una)
     {
-        printf("WARN flow %lu, snd_nxt %lu, snd_una %lu, at %lu\n", m_messages.front().m_flow_id, snd_nxt, snd_una, Simulator::Now().GetTimeStep());
+        uint64_t flow_id = 0;
+        if (!m_pendingMessages.empty())
+        {
+            flow_id = m_pendingMessages.front().m_flow_id;
+        }
+        else if (!m_inFlightMessages.empty())
+        {
+            flow_id = m_inFlightMessages.front().m_flow_id;
+        }
+        printf("WARN flow %lu, snd_nxt %lu, snd_una %lu, at %lu\n",
+               flow_id,
+               snd_nxt,
+               snd_una,
+               Simulator::Now().GetTimeStep());
     }
     return snd_nxt - snd_una;
 }
@@ -224,7 +230,8 @@ RdmaQueuePair::GetWin()
 bool
 RdmaQueuePair::IsFinished()
 {
-    return m_messages.empty();
+    // finished when nothing is left to send AND nothing is waiting for an ACK
+    return m_pendingMessages.empty() && m_inFlightMessages.empty();
 }
 
 void
@@ -244,50 +251,97 @@ RdmaQueuePair::PushMessage(uint64_t size,
     msg.m_size = size;
     msg.m_flow_id = flow_id;
     msg.m_tag = tag;
-    if (m_messages.empty())
+    msg.m_sent = false;
+    msg.m_appNotified = false;
+    msg.m_notifyAppFinish = notifyAppFinish;
+    msg.m_notifyAppSent = notifyAppSent;
+
+    // The start sequence goes right after all existing pending and in-flight
+    // messages, so the QP is one continuous byte stream.
+    uint64_t startSeq;
+    if (!m_pendingMessages.empty())
     {
-        // there are no old messages in the queue, so set start_seq to snd_nxt
-        msg.m_startSeq = snd_nxt;
-        m_lastMessageStartTime = Simulator::Now();
+        const RdmaMessage& lastPending = m_pendingMessages.back();
+        startSeq = lastPending.m_startSeq + lastPending.m_size;
+    }
+    else if (!m_inFlightMessages.empty())
+    {
+        const RdmaMessage& lastInFlight = m_inFlightMessages.back();
+        startSeq = lastInFlight.m_startSeq + lastInFlight.m_size;
     }
     else
     {
-        // there are old messages in the queue, so modify start_seq when finish an old message
-        msg.m_startSeq = 0;
+        // No messages at all - start from current snd_nxt
+        startSeq = snd_nxt;
+        m_lastMessageStartTime = Simulator::Now();
     }
 
-    msg.m_notifyAppFinish = notifyAppFinish;
-    msg.m_notifyAppSent = notifyAppSent;
-    m_messages.push(msg);
+    msg.m_startSeq = startSeq;
+    m_pendingMessages.push_back(msg);
+}
+
+RdmaQueuePair::RdmaMessage
+RdmaQueuePair::MoveCurrentToInFlight()
+{
+    NS_ASSERT(!m_pendingMessages.empty());
+
+    RdmaMessage msg = m_pendingMessages.front();
+    m_pendingMessages.pop_front();
+    msg.m_sent = true;
+
+    // keep it for ACK tracking / retransmission
+    m_inFlightMessages.push_back(msg);
+
+    // the next pending message starts now
+    if (!m_pendingMessages.empty())
+    {
+        m_lastMessageStartTime = Simulator::Now();
+    }
+
+    return msg;
 }
 
 void
 RdmaQueuePair::FinishMessage()
 {
-    if (!m_messages.empty())
+    if (!m_inFlightMessages.empty())
     {
-        const RdmaMessage& msg = m_messages.front();
-        m_messages.pop();
-        msg.m_notifyAppFinish();
-
-        // snd_nxt = snd_una = 0; //TODO is it needed?
+        // Copy and pop BEFORE calling the callback: the callback may push new
+        // messages or inspect IsFinished(), and must not see the finished one.
+        const RdmaMessage msg = m_inFlightMessages.front();
+        m_inFlightMessages.pop_front();
+        if (!msg.m_notifyAppFinish.IsNull())
+        {
+            msg.m_notifyAppFinish();
+        }
     }
     else
     {
-        NS_LOG_ERROR("RdmaQueuePair::FinishMessage(): message is empty but try to finish");
+        NS_LOG_ERROR("RdmaQueuePair::FinishMessage(): in-flight queue is empty but try to finish");
     }
 }
 
 bool
-RdmaQueuePair::IsCurMessageFinished()
+RdmaQueuePair::IsCurMessageFullySent()
 {
-    if (m_messages.empty())
+    if (m_pendingMessages.empty())
     {
         return false;
     }
-    return snd_una >= m_messages.front().m_size + m_messages.front().m_startSeq;
+    const RdmaMessage& msg = m_pendingMessages.front();
+    return snd_nxt >= msg.m_startSeq + msg.m_size;
 }
 
+bool
+RdmaQueuePair::IsOldestInFlightAcked()
+{
+    if (m_inFlightMessages.empty())
+    {
+        return false;
+    }
+    const RdmaMessage& msg = m_inFlightMessages.front();
+    return snd_una >= msg.m_startSeq + msg.m_size;
+}
 
 /*********************
  * RdmaRxQueuePair
@@ -310,6 +364,26 @@ RdmaRxQueuePair::RdmaRxQueuePair()
     m_nackTimer = Time(0);
     m_milestone_rx = 0;
     m_lastNACK = 0;
+}
+
+void
+RdmaRxQueuePair::PushMessage(uint64_t size, uint64_t flow_id, uint64_t tag)
+{
+    // Back-to-back on the receive side as well: each message starts where the
+    // previous queued one ends (std::queue::back() is available).
+    RdmaMessage msg;
+    msg.m_size = size;
+    msg.m_flow_id = flow_id;
+    msg.m_tag = tag;
+    if (m_messages.empty())
+    {
+        msg.m_startSeq = ReceiverNextExpectedSeq;
+    }
+    else
+    {
+        msg.m_startSeq = m_messages.back().m_startSeq + m_messages.back().m_size;
+    }
+    m_messages.push(msg);
 }
 
 uint32_t
@@ -367,7 +441,8 @@ RdmaQueuePairGroup::operator[](uint32_t idx)
     return m_qps[idx];
 }
 
-Ptr<RdmaQueuePair> RdmaQueuePairGroup::Get(uint32_t idx)
+Ptr<RdmaQueuePair>
+RdmaQueuePairGroup::Get(uint32_t idx)
 {
     return (*this)[idx];
 }

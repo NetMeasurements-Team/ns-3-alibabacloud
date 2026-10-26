@@ -169,7 +169,9 @@ RdmaClient::FinishQp()
 void
 RdmaClient::Finish()
 {
-    if (m_passiveDestroy && m_qp->m_messages.size() == 0)
+    // Continuous flow: the QP is done only when nothing is pending AND nothing is
+    // still waiting for an ACK (FinishMessage pops the message before calling us).
+    if (m_passiveDestroy && m_qp->IsFinished())
     {
         FinishQp();
     }

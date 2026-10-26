@@ -131,6 +131,12 @@ RdmaEgressQueue::DoRoundRobin(bool paused[], int& state)
     {
         // dequeue rrlast
         Ptr<Packet> p = m_rdmaGetNxtPkt(qplast);
+        if (p == nullptr)
+        {
+            // continuous flow: GetNxtPacket returns nullptr when nothing is left to send
+            state = -1024;
+            return std::pair<Ptr<RdmaQueuePair>, Ptr<Packet>>(nullptr, nullptr);
+        }
         m_qlast = m_rrlast;
         m_traceRdmaDequeue(p, qplast->m_pg);
         state = m_rrlast;
@@ -170,6 +176,12 @@ RdmaEgressQueue::DoRoundRobin(bool paused[], int& state)
         // dequeue res
         Ptr<RdmaQueuePair> qp = m_qpGrp->m_qps[res];
         Ptr<Packet> p = m_rdmaGetNxtPkt(qp);
+        if (p == nullptr)
+        {
+            // continuous flow: GetNxtPacket returns nullptr when nothing is left to send
+            state = -1024;
+            return std::pair<Ptr<RdmaQueuePair>, Ptr<Packet>>(nullptr, nullptr);
+        }
         m_rrlast = res;
         m_qlast = res;
         m_traceRdmaDequeue(p, qp->m_pg);
