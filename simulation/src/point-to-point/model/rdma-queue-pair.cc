@@ -46,6 +46,7 @@ RdmaQueuePair::RdmaQueuePair(uint16_t pg,
     m_ipid = 0;
     m_win = 0;
     m_baseRtt = 0;
+    m_rtoEnabled = false;
     m_max_rate = 0;
     m_var_win = false;
     m_rate = 0;

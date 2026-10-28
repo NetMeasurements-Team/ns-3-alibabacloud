@@ -44,6 +44,7 @@ class RdmaQueuePair : public Object
     DataRate m_rate; //< Current rate
     Ptr<RdmaCongestionOps> m_congestionControl;
     EventId m_rtoEvent;
+    bool m_rtoEnabled; // RTO timer used for this QP (EnableRto and not over NVLink)
 
     /***********
      * methods

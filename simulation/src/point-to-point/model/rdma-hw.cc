@@ -116,10 +116,16 @@ RdmaHw::GetTypeId(void)
                           MakeTimeAccessor(&RdmaHw::m_cnp_interval),
                           MakeTimeChecker())
             .AddAttribute("EnableRto",
-                          "Enable Rto timer (experimental)",
+                          "Enable the retransmission timeout on network QPs (never on NVLink QPs)",
                           BooleanValue(false),
                           MakeBooleanAccessor(&RdmaHw::m_enable_rto),
-                          MakeBooleanChecker());
+                          MakeBooleanChecker())
+            .AddAttribute("RtoTimeout",
+                          "Retransmission timeout. Default: 4.096 us * 2^20, the RoCE timeout with "
+                          "NCCL's default NCCL_IB_TIMEOUT=20 (0: 30 times the base RTT of the QP)",
+                          TimeValue(NanoSeconds(4294967296)),
+                          MakeTimeAccessor(&RdmaHw::m_rto_timeout),
+                          MakeTimeChecker());
     return tid;
 }
 
@@ -193,13 +199,19 @@ ip_to_node_id(Ipv4Address ip)
     return (ip.Get() >> 8) & 0xffff;
 }
 
+bool
+RdmaHw::IsNvlinkQp(Ptr<RdmaQueuePair> qp)
+{
+    return qp->m_src / m_gpus_per_server == qp->m_dest / m_gpus_per_server ||
+           m_rtTable_nxthop_nvswitch.count(qp->dip.Get()) != 0;
+}
+
 uint32_t
 RdmaHw::GetNicIdxOfQp(Ptr<RdmaQueuePair> qp)
 {
     uint32_t src = qp->m_src;
     uint32_t dst = qp->m_dest;
-    if (src / m_gpus_per_server == dst / m_gpus_per_server ||
-        m_rtTable_nxthop_nvswitch.count(qp->dip.Get()) != 0)
+    if (IsNvlinkQp(qp))
     { // src and dst are in the same server, communicate through nvswitch
         auto& v = m_rtTable_nxthop_nvswitch[qp->dip.Get()];
         if (v.empty())
@@ -270,6 +282,8 @@ RdmaHw::AddQueuePair(uint32_t src,
 
     // add qp
     uint32_t nic_idx = GetNicIdxOfQp(qp);
+    // NVLink is lossless (credit-based): no retransmission timer on NVSwitch paths.
+    qp->m_rtoEnabled = m_enable_rto && !IsNvlinkQp(qp);
 
     // Assign the qp to specific qbbnetdevice
     m_nic[nic_idx].qpGrp->AddQp(qp);
@@ -999,10 +1013,7 @@ RdmaHw::RecoverQueue(Ptr<RdmaQueuePair> qp)
 void
 RdmaHw::QpComplete(Ptr<RdmaQueuePair> qp)
 {
-    if (m_enable_rto)
-    {
-        qp->m_rtoEvent.Cancel();
-    }
+    qp->m_rtoEvent.Cancel();
     NS_ASSERT(!m_qpCompleteCallback.IsNull());
 
     uint32_t nic_idx = GetNicIdxOfQp(qp);
@@ -1169,17 +1180,20 @@ RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp)
 void
 RdmaHw::InitRto(Ptr<RdmaQueuePair> qp)
 {
-    // NOTE: condition kept exactly as in the GitHub version. It looks inverted
-    // (the timer is armed when EnableRto is *false*), see porting notes.
-    if (!m_enable_rto)
+    // The timer is armed only on QPs with m_rtoEnabled: EnableRto is set and the QP does not
+    // go through the NVSwitch. The timeout (RtoTimeout) defaults to what a RoCE NIC
+    // uses with NCCL: 4.096 us * 2^NCCL_IB_TIMEOUT, NCCL default 20: ~4.3 s.
+    // Losses are still recovered with NACKs when the timer is off.
+    if (!qp->m_rtoEnabled)
     {
-        qp->m_rtoEvent.Cancel();
-        if (qp->m_baseRtt > 0 && qp->snd_nxt > qp->snd_una)
-        {
-            // FIXME determine proper timeout value
-            qp->m_rtoEvent =
-                Simulator::Schedule(NanoSeconds(30 * qp->m_baseRtt), &RdmaHw::RtoHandler, this, qp);
-        }
+        return;
+    }
+    qp->m_rtoEvent.Cancel();
+    if (qp->m_baseRtt > 0 && qp->snd_nxt > qp->snd_una)
+    {
+        const Time timeout =
+            m_rto_timeout.IsStrictlyPositive() ? m_rto_timeout : NanoSeconds(30 * qp->m_baseRtt);
+        qp->m_rtoEvent = Simulator::Schedule(timeout, &RdmaHw::RtoHandler, this, qp);
     }
 }
 

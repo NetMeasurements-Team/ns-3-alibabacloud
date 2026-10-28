@@ -183,6 +183,7 @@ class RdmaHw : public Object
     void EnablePause();
     bool enable_pcie_pause;
     bool m_enable_rto;
+    Time m_rto_timeout; // default 4.096 us * 2^20 (NCCL_IB_TIMEOUT=20); 0: 30 * base RTT of the QP
 
     void CheckandSendQCN(Ptr<RdmaRxQueuePair> q);
     int ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size, bool ooo_recursion);
@@ -224,6 +225,7 @@ class RdmaHw : public Object
     void UpdateNextAvail(Ptr<RdmaQueuePair> qp, Time interframeGap, uint32_t pkt_size);
     void ChangeRate(Ptr<RdmaQueuePair> qp, DataRate new_rate);
 
+    bool IsNvlinkQp(Ptr<RdmaQueuePair> qp); // true if the QP goes through the NVSwitch
     void InitRto(Ptr<RdmaQueuePair> qp);
     void RtoHandler(Ptr<RdmaQueuePair> qp);
 
