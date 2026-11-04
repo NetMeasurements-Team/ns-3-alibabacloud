@@ -174,7 +174,6 @@ class RdmaRxQueuePair : public Object
 
     static TypeId GetTypeId(void);
     RdmaRxQueuePair();
-    void SetTag(uint64_t tag);
     void PushMessage(uint64_t size, uint64_t flow_id, uint64_t tag);
     uint32_t GetHash(void);
 };
