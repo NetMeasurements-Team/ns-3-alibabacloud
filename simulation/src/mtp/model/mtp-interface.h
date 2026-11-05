@@ -129,7 +129,13 @@ class MtpInterface
     // get current thread's executing logical process
     inline static LogicalProcess* GetSystem()
     {
-        return static_cast<LogicalProcess*>(pthread_getspecific(g_key));
+        LogicalProcess* lp = static_cast<LogicalProcess*>(pthread_getspecific(g_key));
+        if ((lp == nullptr || lp < g_systems || lp > &g_systems[g_systemCount]) && g_systems != nullptr)
+        {
+            lp = &g_systems[0];
+            pthread_setspecific(g_key, lp);
+        }
+        return lp;
     }
 
     inline static LogicalProcess* GetSystem(const uint32_t systemId)
@@ -175,25 +181,27 @@ class MtpInterface
 
     template <
         typename FUNC,
-        typename std::enable_if<!std::is_convertible<FUNC, Ptr<EventImpl>>::value, int>::type,
+        typename std::enable_if<!std::is_convertible<FUNC, Ptr<EventImpl>>::value, int>::type = 0,
         typename std::enable_if<!std::is_function<typename std::remove_pointer<FUNC>::type>::value,
-                                int>::type,
+                                int>::type = 0,
         typename... Ts>
     inline static void ScheduleGlobal(FUNC f, Ts&&... args)
     {
         CriticalSection cs;
-        g_systems[0].ScheduleAt(Simulator::NO_CONTEXT,
-                                Min(g_smallestTime, g_nextPublicTime),
-                                MakeEvent(f, std::forward<Ts>(args)...));
+        g_systems[0].EnqueueMailbox(0,
+                                    Simulator::NO_CONTEXT,
+                                    g_systems[0].Now(),
+                                    MakeEvent(f, std::forward<Ts>(args)...));
     }
 
     template <typename... Us, typename... Ts>
     inline static void ScheduleGlobal(void (*f)(Us...), Ts&&... args)
     {
         CriticalSection cs;
-        g_systems[0].ScheduleAt(Simulator::NO_CONTEXT,
-                                Min(g_smallestTime, g_nextPublicTime),
-                                MakeEvent(f, std::forward<Ts>(args)...));
+        g_systems[0].EnqueueMailbox(0,
+                                    Simulator::NO_CONTEXT,
+                                    g_systems[0].Now(),
+                                    MakeEvent(f, std::forward<Ts>(args)...));
     }
 
   private:

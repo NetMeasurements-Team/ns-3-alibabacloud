@@ -94,7 +94,12 @@ MtpInterface::Enable (const uint32_t threadCount, const uint32_t systemCount)
 
   // create a thread local storage key
   // so that we can access the currently assigned LP of each thread
-  pthread_key_create (&g_key, nullptr);
+  static bool keyCreated = false;
+  if (!keyCreated)
+    {
+      pthread_key_create (&g_key, nullptr);
+      keyCreated = true;
+    }
   pthread_setspecific (g_key, &g_systems[0]);
 }
 
@@ -131,6 +136,35 @@ MtpInterface::Disable ()
 void
 MtpInterface::Run ()
 {
+  // Enable Run() to be invoked multiple times.
+  // Clear LP's stop flag, synchronize the clock to the latest simulation timestamp, 
+  // drain any newly queued mailbox messages, and recompute 
+  // g_smallestTime / g_nextPublicTime before a re-Run().
+  g_globalFinished = false;
+  uint64_t maxTs = 0;
+  for (uint32_t i = 0; i <= g_systemCount; i++)
+    {
+      g_systems[i].Resume ();
+      uint64_t lpNow = static_cast<uint64_t> (g_systems[i].Now ().GetTimeStep ());
+      if (lpNow > maxTs)
+        {
+          maxTs = lpNow;
+        }
+    }
+  g_systems[0].AdvanceTimeTo (maxTs);
+  {
+    CriticalSection cs;
+    g_systems[0].ReceiveMessages ();
+  }
+  for (uint32_t i = 1; i <= g_systemCount; i++)
+    {
+      g_systems[i].ReceiveMessages ();
+    }
+  CalculateSmallestTime ();
+  if (g_globalFinished)
+    {
+      return;
+    }
   RunBefore ();
   while (!g_globalFinished)
     {
@@ -146,6 +180,7 @@ MtpInterface::RunBefore ()
   CalculateLookAhead ();
 
   // LP index for sorting & holding worker threads
+  delete[] g_sortedSystemIndices;
   g_sortedSystemIndices = new uint32_t[g_systemCount];
   for (uint32_t i = 0; i < g_systemCount; i++)
     {
@@ -154,6 +189,7 @@ MtpInterface::RunBefore ()
   g_systemIndex.store (g_systemCount, std::memory_order_release);
 
   // start threads
+  delete[] g_threads;
   g_threads = new pthread_t[g_threadCount - 1]; // exclude the main thread
   for (uint32_t i = 0; i < g_threadCount - 1; i++)
     {
@@ -220,7 +256,21 @@ MtpInterface::ProcessOneRound ()
 void
 MtpInterface::CalculateSmallestTime ()
 {
-  auto now_time = g_smallestTime;
+  uint64_t maxTs = 0;
+  for (uint32_t i = 0; i <= g_systemCount; i++)
+    {
+      uint64_t lpNow = static_cast<uint64_t> (g_systems[i].Now ().GetTimeStep ());
+      if (lpNow > maxTs)
+        {
+          maxTs = lpNow;
+        }
+    }
+  g_systems[0].AdvanceTimeTo (maxTs);
+  {
+    CriticalSection cs;
+    g_systems[0].ReceiveMessages ();
+  }
+
   // update smallest time
   g_smallestTime = Time::Max () / 2;
   for (uint32_t i = 0; i <= g_systemCount; i++)
@@ -252,6 +302,23 @@ MtpInterface::RunAfter ()
     {
       pthread_join (g_threads[i], nullptr);
     }
+  // release per-run resources so repeated Run() calls do not leak them
+  delete[] g_threads;
+  g_threads = nullptr;
+  delete[] g_sortedSystemIndices;
+  g_sortedSystemIndices = nullptr;
+
+  uint64_t maxTs = 0;
+  for (uint32_t i = 0; i <= g_systemCount; i++)
+    {
+      uint64_t lpNow = static_cast<uint64_t> (g_systems[i].Now ().GetTimeStep ());
+      if (lpNow > maxTs)
+        {
+          maxTs = lpNow;
+        }
+    }
+  g_systems[0].AdvanceTimeTo (maxTs);
+  pthread_setspecific (g_key, &g_systems[0]);
 }
 
 bool

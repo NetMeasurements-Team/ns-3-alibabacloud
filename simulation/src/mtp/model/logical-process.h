@@ -51,6 +51,8 @@ public:
   void ScheduleAt (const uint32_t context, Time const &time, EventImpl *event);
   void ScheduleWithContext (LogicalProcess *remote, const uint32_t context, Time const &delay,
                             EventImpl *event);
+  void EnqueueMailbox (const uint32_t senderId, const uint32_t context, Time const &time,
+                       EventImpl *event);
   void InvokeNow (Scheduler::Event const &ev); // cross context immediate invocation
   void Remove (const EventId &id);
   void Cancel (const EventId &id);
@@ -68,6 +70,21 @@ public:
   Stop ()
   {
     m_stop = true;
+  }
+
+  inline void
+  Resume ()
+  {
+    m_stop = false;
+  }
+
+  inline void
+  AdvanceTimeTo (const uint64_t ts)
+  {
+    if (ts > m_currentTs)
+      {
+        m_currentTs = ts;
+      }
   }
 
   inline Time

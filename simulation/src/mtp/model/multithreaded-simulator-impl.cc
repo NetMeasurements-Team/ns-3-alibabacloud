@@ -191,10 +191,11 @@ void
 MultithreadedSimulatorImpl::Run ()
 {
   NS_LOG_FUNCTION (this);
-  // auto partition
+  // auto partition: partition only once in case of subsequent Run() calls i.e., with Runtime
   if (m_partition)
     {
       Partition ();
+      m_partition = false;
     }
   MtpInterface::Run ();
 }
@@ -373,6 +374,7 @@ MultithreadedSimulatorImpl::Partition ()
   NS_LOG_INFO ("Partition done! " << systemCount << " systems share " << threadCount << " threads");
 
   // create new LPs
+  MtpInterface::GetSystem ()->ReceiveMessages ();
   const Ptr<Scheduler> events = MtpInterface::GetSystem ()->GetPendingEvents ();
   MtpInterface::Disable ();
   MtpInterface::Enable (threadCount, systemCount);

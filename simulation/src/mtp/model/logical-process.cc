@@ -48,6 +48,10 @@ LogicalProcess::Enable (const uint32_t systemId, const uint32_t systemCount)
 {
   m_systemId = systemId;
   m_systemCount = systemCount;
+  for (uint32_t i = 0; i < systemCount; i++)
+    {
+      m_mailbox[i];
+    }
 }
 
 void
@@ -135,6 +139,10 @@ LogicalProcess::ReceiveMessages ()
         {
           auto &evWithTs = queue.back ();
           Scheduler::Event &ev = std::get<3> (evWithTs);
+          if (ev.key.m_ts < m_currentTs)
+            {
+              ev.key.m_ts = m_currentTs;
+            }
           ev.key.m_uid = m_uid++;
           m_events->Insert (ev);
           queue.pop_back ();
@@ -166,7 +174,10 @@ LogicalProcess::ProcessOneRound ()
 
       auto oldT = m_currentTs;
 
-      m_currentTs = next.key.m_ts;
+      if (next.key.m_ts > m_currentTs)
+        {
+          m_currentTs = next.key.m_ts;
+        }
       m_currentContext = next.key.m_context;
       m_currentUid = next.key.m_uid;
       
@@ -198,10 +209,24 @@ LogicalProcess::ScheduleAt (const uint32_t context, Time const &time, EventImpl 
   Scheduler::Event ev;
 
   ev.impl = event;
-  ev.key.m_ts = time.GetTimeStep ();
+  ev.key.m_ts = std::max (m_currentTs, static_cast<uint64_t> (time.GetTimeStep ()));
   ev.key.m_context = context;
   ev.key.m_uid = m_uid++;
   m_events->Insert (ev);
+}
+
+void
+LogicalProcess::EnqueueMailbox (const uint32_t senderId, const uint32_t context, Time const &time,
+                                EventImpl *event)
+{
+  Scheduler::Event ev;
+
+  ev.impl = event;
+  uint64_t ts = std::max (m_currentTs, static_cast<uint64_t> (time.GetTimeStep ()));
+  ev.key.m_ts = ts;
+  ev.key.m_context = context;
+  ev.key.m_uid = EventId::UID::INVALID;
+  m_mailbox[senderId].push_back (std::make_tuple (ts, senderId, m_uid, ev));
 }
 
 void
