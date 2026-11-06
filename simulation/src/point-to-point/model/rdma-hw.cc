@@ -832,7 +832,7 @@ RdmaHw::ReceiverCheckSeq(uint64_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size, bo
         if (Simulator::Now() >= q->m_nackTimer || q->m_lastNACK != expected)
         {
             //printf("NACK %lu\n", q->m_messages.front().m_flow_id);
-            q->m_nackTimer = Simulator::Now() + MicroSeconds(m_nack_interval);
+            q->m_nackTimer = Simulator::Now() + NanoSeconds(m_nack_interval*1000);
             q->m_lastNACK = expected;
             if (m_backto0)
             {

@@ -1,3 +1,8 @@
+set(mtp_libraries)
+if(ENABLE_MTP)
+  list(APPEND mtp_libraries ${libmtp})
+endif()
+
 set(mpi_sources)
 set(mpi_headers)
 set(mpi_libraries)
@@ -64,6 +69,13 @@ build_lib(
     model/nvswitch-node.h
     model/point-to-point-remote-channel.h
   LIBRARIES_TO_LINK ${libnetwork}
+                    ${mtp_libraries}
                     ${mpi_libraries}
   TEST_SOURCES test/point-to-point-test.cc
+               test/mmu-pfc-test-suite.cc
 )
+
+# The PFC system scenario installs an IP stack and uses RDMA packet headers.
+if(ENABLE_TESTS)
+  target_link_libraries(${testpoint-to-point} ${libinternet} ${libapplications})
+endif()

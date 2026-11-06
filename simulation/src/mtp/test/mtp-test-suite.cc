@@ -1,9 +1,7 @@
 /* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
 
-// Include a header file from your module to test.
-#include "ns3/mtp.h"
-
-// An essential include is test.h
+// This generated placeholder only uses the core test framework.
+// The MTP module has no mtp.h header.
 #include "ns3/test.h"
 
 // Do not put your test classes in namespace ns3.  You may find it useful

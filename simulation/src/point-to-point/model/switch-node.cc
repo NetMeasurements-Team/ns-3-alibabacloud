@@ -1,3 +1,4 @@
+#include "ns3/abort.h"
 #include "ns3/ipv4.h"
 #include "ns3/packet.h"
 #include "ns3/ipv4-header.h"
@@ -146,6 +147,10 @@ void SwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch){
 		}
 		// std::cout << "qIndex is: " << qIndex << std::endl;
 
+		// The frontend budgets one protected RDMA priority per ordinary-switch port.
+		NS_ABORT_MSG_IF(qIndex != 0 && qIndex != 3,
+		                "Ordinary switches support only data priority 3 and control priority 0");
+
 		// admission control
 		FlowIdTag t;
 		p->PeekPacketTag(t);
@@ -220,7 +225,7 @@ void SwitchNode::ClearTable(){
 
 // This function can only be called in switch mode
 bool SwitchNode::SwitchReceiveFromDevice(Ptr<NetDevice> device, Ptr<Packet> packet, CustomHeader &ch){
-    Simulator::Schedule(MicroSeconds(m_forwardDelay), &SwitchNode::SendToDev, this, packet, ch);
+    Simulator::Schedule(NanoSeconds(m_forwardDelay*1000), &SwitchNode::SendToDev, this, packet, ch);
 	return true;
 }
 
