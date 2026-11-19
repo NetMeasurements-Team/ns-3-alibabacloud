@@ -3,6 +3,7 @@
 
 #include "ns3/assert.h"
 #include "ns3/log.h"
+#include "ns3/node-list.h"
 #include "ns3/simulator.h"
 #include "ns3/ub-modulo-sequence.h"
 #include "ns3/ub-transport.h"
@@ -26,15 +27,173 @@ UbGbnRetransStrategy::UbGbnRetransStrategy(UbRetransController& controller)
 }
 
 void
+UbGbnRetransStrategy::RetainDescriptor(const UbGbnPacketDescriptor& descriptor)
+{
+    NS_ABORT_MSG_IF(descriptor.logicalPsn < m_controller.GetTransport().GetPsnSndUna(),
+                    "Cannot retain an already acknowledged GBN descriptor");
+    NS_ABORT_MSG_IF(!m_descriptors.emplace(descriptor.logicalPsn, descriptor).second,
+                    "Cannot retain the same GBN PSN descriptor twice");
+}
+
+bool
 UbGbnRetransStrategy::PrepareRetransmissionFromPsn(uint64_t psn)
 {
-    UbTransportChannel& transport = m_controller.GetTransport();
+    const UbTransportChannel& transport = m_controller.GetTransport();
     if (psn < transport.GetPsnSndUna() || psn >= transport.GetPsnSndNxt()) {
+        return false;
+    }
+    const auto descriptor = m_descriptors.lower_bound(psn);
+    if (descriptor == m_descriptors.end() || descriptor->first >= transport.GetPsnSndNxt()) {
+        if (!HasPendingRetransmission()) {
+            m_retransmitCursor.reset();
+            m_retransmitEnd = 0;
+        }
+        return false;
+    }
+    m_retransmitEnd = transport.GetPsnSndNxt();
+    m_retransmitCursor = descriptor->first;
+    return true;
+}
+
+void
+UbGbnRetransStrategy::AdvanceRetransmissionCursor(
+    const UbGbnPacketDescriptor& sentDescriptor)
+{
+    const auto sent = m_descriptors.find(sentDescriptor.logicalPsn);
+    if (sent == m_descriptors.end() ||
+        sent->second.hasCorrelation != sentDescriptor.hasCorrelation ||
+        (sentDescriptor.hasCorrelation &&
+         sent->second.correlation != sentDescriptor.correlation)) {
         return;
     }
+    const auto next = m_descriptors.upper_bound(sentDescriptor.logicalPsn);
+    if (next == m_descriptors.end() || next->first >= m_retransmitEnd) {
+        m_retransmitCursor.reset();
+        m_retransmitEnd = 0;
+        return;
+    }
+    m_retransmitCursor = next->first;
+}
 
-    transport.SetPsnSndNxt(psn);
-    transport.ResetSegmentSendProgressFromPsn(psn);
+Ptr<Packet>
+UbGbnRetransStrategy::TryGetNextRetransmissionPacket()
+{
+    if (!HasPendingRetransmission()) {
+        return nullptr;
+    }
+    const auto descriptorIt = m_descriptors.find(*m_retransmitCursor);
+    NS_ABORT_MSG_IF(descriptorIt == m_descriptors.end(),
+                    "GBN retransmission cursor lost its descriptor");
+    const UbGbnPacketDescriptor descriptor = descriptorIt->second;
+    Ptr<Packet> packet = m_controller.GetTransport().SendGbnRetransmission(descriptor);
+    if (packet != nullptr) {
+        AdvanceRetransmissionCursor(descriptor);
+    }
+    return packet;
+}
+
+bool
+UbGbnRetransStrategy::HasPendingRetransmission() const
+{
+    return m_retransmitCursor.has_value() && *m_retransmitCursor < m_retransmitEnd &&
+           m_descriptors.find(*m_retransmitCursor) != m_descriptors.end();
+}
+
+uint32_t
+UbGbnRetransStrategy::GetNextRetransmissionSize() const
+{
+    if (!HasPendingRetransmission()) {
+        return 0;
+    }
+    return m_descriptors.at(*m_retransmitCursor).wireLengthBytes;
+}
+
+uint32_t
+UbGbnRetransStrategy::GetNextRetransmissionProgressBytes() const
+{
+    if (!HasPendingRetransmission()) {
+        return 0;
+    }
+    return m_descriptors.at(*m_retransmitCursor).progressBytes;
+}
+
+uint32_t
+UbGbnRetransStrategy::GetNextRetransmissionPayloadBytes() const
+{
+    if (!HasPendingRetransmission()) {
+        return 0;
+    }
+    return m_descriptors.at(*m_retransmitCursor).payloadBytes;
+}
+
+const UbGbnPacketDescriptor*
+UbGbnRetransStrategy::GetNextRetransmissionDescriptor() const
+{
+    if (!HasPendingRetransmission())
+    {
+        return nullptr;
+    }
+    return &m_descriptors.at(*m_retransmitCursor);
+}
+
+uint32_t
+UbGbnRetransStrategy::GetRetransmissionPayloadBytesFrom(uint64_t psn) const
+{
+    uint32_t payloadBytes = 0;
+    for (auto descriptor = m_descriptors.lower_bound(psn);
+         descriptor != m_descriptors.end() &&
+         descriptor->first < m_controller.GetTransport().GetPsnSndNxt();
+         ++descriptor) {
+        payloadBytes += descriptor->second.payloadBytes;
+    }
+    return payloadBytes;
+}
+
+bool
+UbGbnRetransStrategy::HasOutstandingDescriptors() const
+{
+    return !m_descriptors.empty();
+}
+
+void
+UbGbnRetransStrategy::AcknowledgePrefix(uint64_t newSndUna)
+{
+    m_descriptors.erase(m_descriptors.begin(), m_descriptors.lower_bound(newSndUna));
+    if (!m_retransmitCursor.has_value()) {
+        return;
+    }
+    const auto next = m_descriptors.lower_bound(*m_retransmitCursor);
+    if (next == m_descriptors.end() || next->first >= m_retransmitEnd) {
+        m_retransmitCursor.reset();
+        m_retransmitEnd = 0;
+    } else {
+        m_retransmitCursor = next->first;
+    }
+}
+
+void
+UbGbnRetransStrategy::RetireSegment(const UbTransactionCorrelationIdentity& correlation,
+                                    uint64_t psnStart,
+                                    uint64_t psnEnd)
+{
+    for (auto descriptor = m_descriptors.lower_bound(psnStart);
+         descriptor != m_descriptors.end() && descriptor->first < psnEnd;) {
+        if (descriptor->second.hasCorrelation && descriptor->second.correlation == correlation) {
+            descriptor = m_descriptors.erase(descriptor);
+        } else {
+            ++descriptor;
+        }
+    }
+    if (m_retransmitCursor.has_value() && *m_retransmitCursor >= psnStart &&
+        *m_retransmitCursor < psnEnd) {
+        const auto next = m_descriptors.lower_bound(*m_retransmitCursor);
+        if (next == m_descriptors.end() || next->first >= m_retransmitEnd) {
+            m_retransmitCursor.reset();
+            m_retransmitEnd = 0;
+        } else {
+            m_retransmitCursor = next->first;
+        }
+    }
 }
 
 bool
@@ -50,8 +209,7 @@ UbGbnRetransStrategy::HandleTpNak(uint64_t nakPsn)
         return false;
     }
 
-    PrepareRetransmissionFromPsn(nakPsn);
-    return true;
+    return PrepareRetransmissionFromPsn(nakPsn);
 }
 
 UbRetransReceiveDecision
@@ -91,8 +249,11 @@ UbGbnRetransStrategy::OnTimeout()
         return result;
     }
 
-    PrepareRetransmissionFromPsn(m_controller.GetTransport().GetPsnSndUna());
-    result.triggerTransmit = true;
+    const uint64_t sndUna = m_controller.GetTransport().GetPsnSndUna();
+    result.triggerTransmit = PrepareRetransmissionFromPsn(sndUna);
+    if (result.triggerTransmit) {
+        result.retransmitBytes = GetRetransmissionPayloadBytesFrom(sndUna);
+    }
     return result;
 }
 
@@ -104,19 +265,43 @@ UbGbnRetransStrategy::ClearNakSuppressionIfGapClosed(uint64_t recvNext)
     }
 }
 
+uint32_t
+UbGbnRetransStrategy::GetDescriptorCountForTest() const
+{
+    return static_cast<uint32_t>(m_descriptors.size());
+}
+
+bool
+UbGbnRetransStrategy::HasDescriptorForTest(uint64_t psn) const
+{
+    return m_descriptors.find(psn) != m_descriptors.end();
+}
+
+uint64_t
+UbGbnRetransStrategy::GetRetransmissionCursorForTest() const
+{
+    return m_retransmitCursor.value_or(std::numeric_limits<uint64_t>::max());
+}
+
+void
+UbGbnRetransStrategy::Clear()
+{
+    m_descriptors.clear();
+    m_retransmitCursor.reset();
+    m_retransmitEnd = 0;
+    m_lastNakPsn = std::numeric_limits<uint64_t>::max();
+}
+
 UbSelectiveRetransStrategy::UbSelectiveRetransStrategy(UbRetransController& controller)
     : m_controller(controller)
 {
 }
 
 void
-UbSelectiveRetransStrategy::RetainSentPsn(uint64_t psn,
-                                          Ptr<Packet> packet,
-                                          uint32_t payloadBytes)
+UbSelectiveRetransStrategy::RetainSentPsn(const UbGbnPacketDescriptor& descriptor)
 {
-    SentPsnState& state = m_sentPsnState[psn];
-    state.packet = packet != nullptr ? packet->Copy() : nullptr;
-    state.payloadBytes = payloadBytes;
+    SentPsnState& state = m_sentPsnState[descriptor.logicalPsn];
+    state.descriptor = descriptor;
     state.acknowledged = false;
     state.selectivelyReportedMissing = false;
     state.retransmitPending = false;
@@ -131,7 +316,6 @@ UbSelectiveRetransStrategy::MarkPsnAcked(uint64_t psn)
         return;
     }
     it->second.acknowledged = true;
-    it->second.packet = nullptr;
     it->second.selectivelyReportedMissing = false;
     it->second.retransmitPending = false;
 }
@@ -274,7 +458,7 @@ UbSelectiveRetransStrategy::CompactRetransmissionQueue()
     for (uint64_t psn : m_selectiveRetransmitQ) {
         auto it = m_sentPsnState.find(psn);
         if (it != m_sentPsnState.end() && !it->second.acknowledged &&
-            it->second.retransmitPending && it->second.packet != nullptr)
+            it->second.retransmitPending)
         {
             liveQueue.push_back(psn);
         }
@@ -287,7 +471,7 @@ UbSelectiveRetransStrategy::HasPendingRetransmission() const
 {
     for (uint64_t psn : m_selectiveRetransmitQ) {
         auto it = m_sentPsnState.find(psn);
-        if (it != m_sentPsnState.end() && !it->second.acknowledged && it->second.packet != nullptr) {
+        if (it != m_sentPsnState.end() && !it->second.acknowledged) {
             return true;
         }
     }
@@ -311,8 +495,8 @@ UbSelectiveRetransStrategy::GetNextRetransmissionSize() const
 {
     for (uint64_t psn : m_selectiveRetransmitQ) {
         auto it = m_sentPsnState.find(psn);
-        if (it != m_sentPsnState.end() && !it->second.acknowledged && it->second.packet != nullptr) {
-            return it->second.packet->GetSize();
+        if (it != m_sentPsnState.end() && !it->second.acknowledged) {
+            return it->second.descriptor.serializedSizeBytes;
         }
     }
     return 0;
@@ -323,8 +507,8 @@ UbSelectiveRetransStrategy::GetNextRetransmissionPayloadBytes() const
 {
     for (uint64_t psn : m_selectiveRetransmitQ) {
         auto it = m_sentPsnState.find(psn);
-        if (it != m_sentPsnState.end() && !it->second.acknowledged && it->second.packet != nullptr) {
-            return it->second.payloadBytes;
+        if (it != m_sentPsnState.end() && !it->second.acknowledged) {
+            return it->second.descriptor.payloadBytes;
         }
     }
     return 0;
@@ -334,7 +518,31 @@ uint32_t
 UbSelectiveRetransStrategy::GetRetainedPayloadBytes(uint64_t psn) const
 {
     auto it = m_sentPsnState.find(psn);
-    return it == m_sentPsnState.end() ? 0 : it->second.payloadBytes;
+    return it == m_sentPsnState.end() ? 0 : it->second.descriptor.payloadBytes;
+}
+
+bool
+UbSelectiveRetransStrategy::HasOutstandingPackets() const
+{
+    if (m_controller.IsCollectingTimerStatsForTest())
+    {
+        uint64_t entriesVisited = 0;
+        for (const auto& [psn, state] : m_sentPsnState)
+        {
+            (void)psn;
+            ++entriesVisited;
+            if (!state.acknowledged)
+            {
+                m_controller.RecordSelectiveOutstandingScanForTest(entriesVisited);
+                return true;
+            }
+        }
+        m_controller.RecordSelectiveOutstandingScanForTest(entriesVisited);
+        return false;
+    }
+    return std::any_of(m_sentPsnState.begin(),
+                       m_sentPsnState.end(),
+                       [](const auto& entry) { return !entry.second.acknowledged; });
 }
 
 Ptr<Packet>
@@ -344,14 +552,15 @@ UbSelectiveRetransStrategy::TryGetNextRetransmissionPacket()
     while (CanSendRetransmission()) {
         const uint64_t psn = m_selectiveRetransmitQ.front();
         auto it = m_sentPsnState.find(psn);
-        if (it == m_sentPsnState.end() || it->second.acknowledged || it->second.packet == nullptr) {
+        if (it == m_sentPsnState.end() || it->second.acknowledged) {
             m_selectiveRetransmitQ.pop_front();
             if (IsMarkPsnEnabled()) {
                 FinishMarkPsnRetransPhaseIfDone();
             }
             continue;
         }
-        const uint32_t payloadBytes = it->second.payloadBytes;
+        const UbGbnPacketDescriptor descriptor = it->second.descriptor;
+        const uint32_t payloadBytes = descriptor.payloadBytes;
         if (transport.IsCcLimitedForRetransmission(payloadBytes)) {
             transport.SetSendWindowLimited(true);
             return nullptr;
@@ -363,8 +572,7 @@ UbSelectiveRetransStrategy::TryGetNextRetransmissionPacket()
             m_lastFirstRtxPsnValid = true;
         }
         it->second.retransmitCount++;
-        transport.OnSelectiveRetransmissionPacketSent(psn, payloadBytes);
-        Ptr<Packet> retransmission = it->second.packet->Copy();
+        Ptr<Packet> retransmission = transport.SendSelectiveRetransmission(descriptor);
         if (IsMarkPsnEnabled()) {
             FinishMarkPsnRetransPhaseIfDone();
         }
@@ -581,14 +789,34 @@ UbSelectiveRetransStrategy::BuildReceiveDecisionForCurrentState() const
 }
 
 void
-UbSelectiveRetransStrategy::OnNewDataPacketSent(uint64_t psn,
-                                                Ptr<Packet> packet,
-                                                uint32_t payloadBytes)
+UbSelectiveRetransStrategy::OnNewDataPacketSent(const UbGbnPacketDescriptor& descriptor)
 {
     if (IsMarkPsnEnabled()) {
-        MaybeMarkFirstNewSelectivePacket(psn);
+        MaybeMarkFirstNewSelectivePacket(descriptor.logicalPsn);
     }
-    RetainSentPsn(psn, packet, payloadBytes);
+    RetainSentPsn(descriptor);
+}
+
+void
+UbSelectiveRetransStrategy::RetireSegment(
+    const UbTransactionCorrelationIdentity& correlation,
+    uint64_t psnStart,
+    uint64_t psnEnd)
+{
+    for (auto descriptor = m_sentPsnState.lower_bound(psnStart);
+         descriptor != m_sentPsnState.end() && descriptor->first < psnEnd;)
+    {
+        if (descriptor->second.descriptor.hasCorrelation &&
+            descriptor->second.descriptor.correlation == correlation)
+        {
+            descriptor = m_sentPsnState.erase(descriptor);
+        }
+        else
+        {
+            ++descriptor;
+        }
+    }
+    CompactRetransmissionQueue();
 }
 
 void
@@ -679,7 +907,7 @@ UbSelectiveRetransStrategy::GetPendingRetransmissionCountForTest() const
     uint32_t count = 0;
     for (uint64_t psn : m_selectiveRetransmitQ) {
         auto it = m_sentPsnState.find(psn);
-        if (it != m_sentPsnState.end() && !it->second.acknowledged && it->second.packet != nullptr) {
+        if (it != m_sentPsnState.end() && !it->second.acknowledged) {
             ++count;
         }
     }
@@ -879,18 +1107,54 @@ UbRetransController::GetRetransEnable() const
 void
 UbRetransController::ScheduleTimeout()
 {
-    m_retransEvent = Simulator::Schedule(m_rto, &UbTransportChannel::ReTxTimeout, &m_transport);
+    if (m_collectTimerTestStats)
+    {
+        ++m_timerTestStats.scheduleCalls;
+    }
+    const UbLifecycleResourceIdentity& owner = m_transport.GetLifecycleOwner();
+    if (owner.generation == 0)
+    {
+        m_retransEvent =
+            Simulator::Schedule(m_rto, &UbTransportChannel::ReTxTimeout, &m_transport);
+        return;
+    }
+    if (!m_trackedEventsInitialized)
+    {
+        m_trackedEvents.Init(
+            UbLifecycleCoordinator::GetOrCreate(NodeList::GetNode(m_transport.GetSrc())));
+        m_trackedEventsInitialized = true;
+    }
+    const uint64_t token = m_trackedEvents.Track(owner);
+    m_retransEvent =
+        Simulator::Schedule(m_rto, &UbRetransController::HandleTrackedTimeout, this, token);
+    m_trackedEvents.Attach(owner, token, m_retransEvent, {});
+}
+
+void
+UbRetransController::HandleTrackedTimeout(uint64_t token)
+{
+    const UbLifecycleResourceIdentity& owner = m_transport.GetLifecycleOwner();
+    if (!m_trackedEvents.Begin(owner, token))
+    {
+        return;
+    }
+    m_transport.ReTxTimeout();
+    m_trackedEvents.Resolve(owner, token);
 }
 
 void
 UbRetransController::StartTimerIfNeeded()
 {
-    if (!m_enableRetrans)
+    if (m_collectTimerTestStats)
+    {
+        ++m_timerTestStats.startCalls;
+    }
+    if (!m_enableRetrans || !m_retransEvent.IsExpired())
     {
         return;
     }
 
-    if (!m_retransEvent.IsExpired())
+    if (!HasOutstandingRetransmissionState())
     {
         return;
     }
@@ -902,6 +1166,10 @@ UbRetransController::StartTimerIfNeeded()
 void
 UbRetransController::RestartTimerAfterAckProgress()
 {
+    if (m_collectTimerTestStats)
+    {
+        ++m_timerTestStats.restartCalls;
+    }
     if (!m_enableRetrans)
     {
         return;
@@ -909,14 +1177,24 @@ UbRetransController::RestartTimerAfterAckProgress()
 
     m_rto = m_baseRto;
     m_retransAttemptsLeft = m_maxRetransAttempts;
-    m_retransEvent.Cancel();
-    ScheduleTimeout();
+    CancelTimer();
+    if (HasOutstandingRetransmissionState()) {
+        ScheduleTimeout();
+    }
 }
 
 void
 UbRetransController::CancelTimer()
 {
+    if (m_collectTimerTestStats)
+    {
+        ++m_timerTestStats.cancelCalls;
+    }
     m_retransEvent.Cancel();
+    if (m_trackedEventsInitialized)
+    {
+        m_trackedEvents.CancelPending(m_transport.GetLifecycleOwner());
+    }
 }
 
 UbRetransTimeoutResult
@@ -953,6 +1231,21 @@ UbRetransController::HasTimerRunning() const
     return !m_retransEvent.IsExpired();
 }
 
+bool
+UbRetransController::HasOutstandingRetransmissionState() const
+{
+    if (!m_enableRetrans) {
+        return false;
+    }
+    if (m_retransmissionMode == UbRetransmissionMode::GBN) {
+        return m_gbn->HasOutstandingDescriptors();
+    }
+    if (m_retransmissionMode == UbRetransmissionMode::SELECTIVE) {
+        return m_selective->HasOutstandingPackets();
+    }
+    return false;
+}
+
 UbRetransAckResult
 UbRetransController::OnTransportNak(const UbTransportHeader& tph)
 {
@@ -970,11 +1263,9 @@ UbRetransController::OnTransportNak(const UbTransportHeader& tph)
             result.ignoreResponse = true;
             return result;
         }
-        result.retransmitBytes =
-            m_transport.GetGbnRetransmissionProgressBytesFromPsn(*logicalNakPsn);
         result.triggerTransmit = m_gbn->HandleTpNak(*logicalNakPsn);
-        if (!result.triggerTransmit) {
-            result.retransmitBytes = 0;
+        if (result.triggerTransmit) {
+            result.retransmitBytes = m_gbn->GetRetransmissionPayloadBytesFrom(*logicalNakPsn);
         }
     }
     return result;
@@ -1010,6 +1301,8 @@ UbRetransController::OnSenderCumulativeAckProgress(uint64_t previousSndUna,
     }
     if (m_retransmissionMode == UbRetransmissionMode::SELECTIVE) {
         m_selective->OnCumulativeAckProgress(previousSndUna, newSndUna);
+    } else if (m_retransmissionMode == UbRetransmissionMode::GBN) {
+        m_gbn->AcknowledgePrefix(newSndUna);
     }
 }
 
@@ -1058,17 +1351,17 @@ UbRetransController::BuildReceiveDecisionForCurrentState() const
 }
 
 void
-UbRetransController::OnNewDataPacketSent(uint64_t psn,
-                                         Ptr<Packet> packet,
-                                         uint32_t payloadBytes)
+UbRetransController::OnNewDataPacketSent(const UbGbnPacketDescriptor& descriptor)
 {
     if (!m_enableRetrans)
     {
         return;
     }
 
-    if (m_retransmissionMode == UbRetransmissionMode::SELECTIVE) {
-        m_selective->OnNewDataPacketSent(psn, packet, payloadBytes);
+    if (m_retransmissionMode == UbRetransmissionMode::GBN) {
+        m_gbn->RetainDescriptor(descriptor);
+    } else if (m_retransmissionMode == UbRetransmissionMode::SELECTIVE) {
+        m_selective->OnNewDataPacketSent(descriptor);
     }
 }
 
@@ -1080,10 +1373,74 @@ UbRetransController::TryGetNextRetransmissionPacket()
         return nullptr;
     }
 
+    if (m_retransmissionMode == UbRetransmissionMode::GBN) {
+        return m_gbn->TryGetNextRetransmissionPacket();
+    }
     if (m_retransmissionMode == UbRetransmissionMode::SELECTIVE) {
         return m_selective->TryGetNextRetransmissionPacket();
     }
     return nullptr;
+}
+
+bool
+UbRetransController::HasPendingGbnRetransmission() const
+{
+    return m_enableRetrans && m_retransmissionMode == UbRetransmissionMode::GBN &&
+           m_gbn->HasPendingRetransmission();
+}
+
+uint32_t
+UbRetransController::GetNextGbnRetransmissionSize() const
+{
+    return HasPendingGbnRetransmission() ? m_gbn->GetNextRetransmissionSize() : 0;
+}
+
+uint32_t
+UbRetransController::GetNextGbnRetransmissionProgressBytes() const
+{
+    return HasPendingGbnRetransmission() ? m_gbn->GetNextRetransmissionProgressBytes() : 0;
+}
+
+uint32_t
+UbRetransController::GetNextGbnRetransmissionPayloadBytes() const
+{
+    return HasPendingGbnRetransmission() ? m_gbn->GetNextRetransmissionPayloadBytes() : 0;
+}
+
+const UbGbnPacketDescriptor*
+UbRetransController::GetNextGbnRetransmissionDescriptor() const
+{
+    return HasPendingGbnRetransmission() ? m_gbn->GetNextRetransmissionDescriptor() : nullptr;
+}
+
+void
+UbRetransController::RetireGbnSegment(const UbTransactionCorrelationIdentity& correlation,
+                                      uint64_t psnStart,
+                                      uint64_t psnEnd)
+{
+    if (m_retransmissionMode != UbRetransmissionMode::GBN) {
+        return;
+    }
+    m_gbn->RetireSegment(correlation, psnStart, psnEnd);
+    if (!m_gbn->HasOutstandingDescriptors()) {
+        CancelTimer();
+    }
+}
+
+void
+UbRetransController::RetireSegmentDescriptors(
+    const UbTransactionCorrelationIdentity& correlation,
+    uint64_t psnStart,
+    uint64_t psnEnd)
+{
+    if (m_retransmissionMode == UbRetransmissionMode::GBN) {
+        m_gbn->RetireSegment(correlation, psnStart, psnEnd);
+    } else if (m_retransmissionMode == UbRetransmissionMode::SELECTIVE) {
+        m_selective->RetireSegment(correlation, psnStart, psnEnd);
+    }
+    if (!HasOutstandingRetransmissionState()) {
+        CancelTimer();
+    }
 }
 
 bool
@@ -1158,9 +1515,62 @@ UbRetransController::GetPsnRetransmitCountForTest(uint64_t psn) const
     return m_selective->GetPsnRetransmitCountForTest(psn);
 }
 
+uint32_t
+UbRetransController::GetGbnDescriptorCountForTest() const
+{
+    return m_gbn->GetDescriptorCountForTest();
+}
+
+bool
+UbRetransController::HasGbnDescriptorForTest(uint64_t psn) const
+{
+    return m_gbn->HasDescriptorForTest(psn);
+}
+
+uint64_t
+UbRetransController::GetGbnRetransmissionCursorForTest() const
+{
+    return m_gbn->GetRetransmissionCursorForTest();
+}
+
+void
+UbRetransController::RetainGbnDescriptorForTest(const UbGbnPacketDescriptor& descriptor)
+{
+    m_gbn->RetainDescriptor(descriptor);
+}
+
+void
+UbRetransController::ResetTimerStatsForTest()
+{
+    m_collectTimerTestStats = true;
+    m_timerTestStats = {};
+}
+
+UbRetransTimerTestStats
+UbRetransController::GetTimerStatsForTest() const
+{
+    return m_timerTestStats;
+}
+
+bool
+UbRetransController::IsCollectingTimerStatsForTest() const
+{
+    return m_collectTimerTestStats;
+}
+
+void
+UbRetransController::RecordSelectiveOutstandingScanForTest(uint64_t entriesVisited) const
+{
+    ++m_timerTestStats.selectiveOutstandingScanCalls;
+    m_timerTestStats.selectiveOutstandingEntriesVisited += entriesVisited;
+}
+
 void
 UbRetransController::ClearRetainedState()
 {
+    if (m_gbn != nullptr) {
+        m_gbn->Clear();
+    }
     if (m_selective != nullptr) {
         m_selective->Clear();
     }

@@ -463,6 +463,17 @@ UbHostCaqm::OnSenderCongestionNotification(TpOpcode opcode,
 }
 
 void
+UbHostCaqm::OnSenderRetransmissionRollback(uint32_t retransmitBytes)
+{
+    if (!m_congestionCtrlEnabled)
+    {
+        return;
+    }
+    m_dataByteSent = (m_dataByteSent >= retransmitBytes) ? m_dataByteSent - retransmitBytes : 0;
+    m_inFlight = std::min(m_inFlight, m_dataByteSent);
+}
+
+void
 UbHostCaqm::OnSenderRetransmissionPacketSent(uint32_t psn, uint32_t size)
 {
     OnSenderDataPacketSent(psn, size);
@@ -539,16 +550,10 @@ void UbSwitchCaqm::ResetLocalCc()
         auto sw = node->GetObject<UbSwitch>();
         uint32_t ndevice = node->GetNDevices();
         for (uint32_t portId = 0; portId < ndevice; portId++) {
-            // 使用OutPort视图统计VOQ占用
-            uint64_t voqUsed = sw->GetQueueManager()->GetTotalOutPortBufferUsed(portId);
-            
-            // 加上EgressQueue的字节占用
+            uint64_t totalQueueSize =
+                sw->GetQueueManager()->GetOutPortQueueBacklogBytes(portId);
             Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(portId));
-            uint64_t egressUsed = port->GetUbQueue()->GetCurrentBytes();
             const DataRate portRate = port->GetDataRate();
-            
-            // 总队列占用 = VOQ + EgressQueue
-            uint64_t totalQueueSize = voqUsed + egressUsed;
             
             uint64_t cc = uint64_t(m_lambda *
                                 (m_ccUpdatePeriod.GetSeconds()
@@ -583,11 +588,7 @@ void UbSwitchCaqm::OnSwitchPostDequeue(uint32_t inPort, uint32_t outPort, Ptr<Pa
         auto node = NodeList::GetNode(m_nodeId);
         auto sw = node->GetObject<UbSwitch>();
         
-        // 计算总队列占用 = VOQ + EgressQueue
-        uint64_t voqUsed = sw->GetQueueManager()->GetTotalOutPortBufferUsed(outPort);
-        Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(outPort));
-        uint64_t egressUsed = port->GetUbQueue()->GetCurrentBytes();
-        uint64_t totalQueueSize = voqUsed + egressUsed;
+        uint64_t totalQueueSize = sw->GetQueueManager()->GetOutPortQueueBacklogBytes(outPort);
         
         NS_LOG_DEBUG("[" << GetTypeId().GetName() << "]"
                   << "[Debug]"
@@ -595,9 +596,7 @@ void UbSwitchCaqm::OnSwitchPostDequeue(uint32_t inPort, uint32_t outPort, Ptr<Pa
                   << " Node:" << m_nodeId
                   << " Inport:" << inPort
                   << " OutPort:" << outPort
-                  << " VOQ:" << voqUsed
-                  << " Egress:" << egressUsed
-                  << " Total queue:" << totalQueueSize
+                  << " Queue backlog:" << totalQueueSize
                   << " Txsize:" << m_txSize[outPort]);
         UbDatalinkPacketHeader dlPktHeader;
         UbIpBasedNetworkHeader netHeader;

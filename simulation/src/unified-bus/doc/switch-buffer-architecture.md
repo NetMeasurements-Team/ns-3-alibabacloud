@@ -8,7 +8,7 @@
 
 - **准确的流控决策**：通过 InPort 视图统计，准确判断每个入端口的缓冲区占用，支持 PFC（Priority Flow Control）等流控机制
 - **精确的负载均衡**：通过 OutPort 视图统计，实时掌握每个出端口的负载情况，支持自适应路由选择
-- **拥塞控制集成**：OutPort 视图 + EgressQueue 统计为 CAQM 等拥塞控制算法提供准确的队列深度信息
+- **拥塞控制集成**：Queue Backlog 统计 VOQ + EgressQueue，供 DCQCN/CAQM 判断排队积压
 - **灵活的优先级管理**：支持多优先级队列，两个视图均按优先级独立统计
 
 ### 1.2 关键组件
@@ -73,7 +73,7 @@ uint64_t GetPortIngressNonHeadroomBytes(uint32_t inPort);
 **用途**：**出端口负载均衡和拥塞控制**
 
 - **多路径路由**：比较候选出端口的 OutPort 视图统计，选择负载最轻的路径
-- **拥塞控制（CAQM）**：OutPort 视图 + EgressQueue 字节数 = 总队列深度，用于计算拥塞信用
+- **拥塞控制（DCQCN/CAQM）**：使用 Queue Backlog，即 VOQ + EgressQueue 字节数，排除固定处理阶段的字节
 - **监控统计**：纯监控功能，**不影响丢包决策**（OutPort 视图无物理缓冲区限制）
 
 **关键 API**：
@@ -81,7 +81,57 @@ uint64_t GetPortIngressNonHeadroomBytes(uint32_t inPort);
 bool CheckOutPortSpace(uint32_t outPort, uint32_t priority, uint32_t pSize);  // 始终返回 true
 uint64_t GetOutPortBufferUsed(uint32_t outPort, uint32_t priority);
 uint64_t GetTotalOutPortBufferUsed(uint32_t outPort);
+uint64_t GetOutPortBufferOccupancyBytes(uint32_t outPort) const;
+uint64_t GetOutPortQueueBacklogBytes(uint32_t outPort) const;
 ```
+
+### PAPER 与 pending recovery ingress 占用
+
+`PFC_DYNAMIC_PAPER` 的 PAUSE/RESUME 和 ingress 准入共用 queue manager 的 O(1) 占用计算：
+
+```text
+B_paper = total_buffered_bytes - recovery_voq_bytes + pending_recovery_ingress_bytes
+XOFF = beta * max(SharedPoolBytes - B_paper, 0) / 8
+XON = max(XOFF - 2 * UB_MTU_BYTE, 0)
+```
+
+`pending_recovery_ingress_bytes` 仅计入仍持有原 ingress 预留的 pending 子集。
+processing 或普通 VOQ 转 pending 时增加，进入健康 VOQ 或按既有分支移除时按
+`ingressHeld` 扣减，初始化归零。更新在既有转换内、可观察回调之前完成，扣减检查下溢。
+因此 processing / 普通 VOQ → pending → 健康 VOQ 不会因暂存位置变化而提前 RESUME
+或放宽准入；实际释放后容量正常恢复。
+
+原 ingress 已释放的 failed-egress / retry 使用独立恢复存储，不计入该子集；其进入
+recovery VOQ 后仍按 `recovery_voq_bytes` 扣除。通用 `total_buffered_bytes`、输出
+backlog 和普通 egress 的既有口径不变；本修复不改变 LastAck 门控、信用返还或调度。
+这一边界落实 [ADR 0029](../../../doc/adr/0029-retain-original-packets-for-failure-recovery.md)。
+
+### 2.3 Buffer Occupancy 与 Queue Backlog
+
+两个查询都聚合一个出端口的所有 VL 和入端口，包括该端口的本地控制帧：
+
+| 查询 | 统计范围 | 用途 |
+| --- | --- | --- |
+| `GetOutPortBufferOccupancyBytes()` | processing + VOQ + egress queue | 缓冲占用观察 |
+| `GetOutPortQueueBacklogBytes()` | VOQ + egress queue | DCQCN/CAQM 拥塞反馈 |
+
+`forwardDelay` 是固定、非阻塞的入端口处理时延。报文进入 processing 时即占用
+ingress admission 配额，但要等处理完成后才进入 VOQ、参与仲裁。
+从 processing 移到 VOQ 时 Buffer Occupancy 不变，Queue Backlog 增加；
+从 VOQ 移到 egress 后，两者在完成转移时都不变；从 egress 取出开始发送后，两者减少。
+正在序列化或链路传播中的报文不属于这两个查询。
+
+旧接口 `GetTotalOutPortBufferUsed()` 仍表示 processing + VOQ，不含 egress。
+按 VL 的 `GetOutPortBufferUsed()` 继续用于自适应路由。Ingress admission、PFC 和交换机
+总缓冲占用继续包含 processing。独立使用且未设置 owner node 的 QueueManager 没有关联的
+egress queue，新查询的 egress 项为零。
+
+这一划分针对本模拟器的处理阶段，不是对 UB 硬件内部 SRAM 布局的规定。
+DCQCN 原论文 §3.1、§4 将 ECN 阈值定义在 egress queue，并与 ingress PFC 区分；
+TIMELY §3.1 区分固定交换机转发时延与 queueing delay。
+参考 [issue #29](https://gitcode.com/open-usim/ns-3-ub/issues/29)、
+[DCQCN](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/lossless.pdf) 和
+[TIMELY](https://conferences.sigcomm.org/sigcomm/2015/pdf/papers/p537.pdf)。
 
 ---
 
@@ -225,7 +275,7 @@ Input Port → VOQ[outPort][priority][inPort] → EgressQueue[outPort] → Outpu
 
 ### 4.2 总队列深度计算
 
-**公式**：`总队列深度 = VOQ OutPort 视图 + EgressQueue 字节数`
+**公式**：`Queue Backlog = VOQ bytes + EgressQueue bytes`，不含 processing bytes。
 
 #### 实现示例（CAQM 拥塞控制）
 
@@ -234,20 +284,13 @@ Input Port → VOQ[outPort][priority][inPort] → EgressQueue[outPort] → Outpu
 void UbSwitchCaqm::ResetLocalCc()
 {
     for (uint32_t portId = 0; portId < ndevice; portId++) {
-        // 1. 使用 OutPort 视图统计 VOQ 占用
-        uint64_t voqUsed = sw->GetQueueManager()->GetTotalOutPortBufferUsed(portId);
-        
-        // 2. 加上 EgressQueue 的字节占用
+        uint64_t totalQueueSize = sw->GetQueueManager()->GetOutPortQueueBacklogBytes(portId);
         Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(portId));
-        uint64_t egressUsed = port->GetUbQueue()->GetCurrentBytes();
-        
-        // 3. 总队列占用 = VOQ + EgressQueue
-        uint64_t totalQueueSize = voqUsed + egressUsed;
-        
-        // 4. 计算拥塞信用（CC）
+
+        // 计算拥塞信用（CC）
         uint64_t cc = uint64_t(m_lambda *
                             (m_ccUpdatePeriod.GetSeconds()
-                            * m_bps[portId].GetBitRate() / 8
+                            * port->GetDataRate().GetBitRate() / 8
                             - m_txSize[portId]
                             + m_idealQueueSize
                             - totalQueueSize          // ← 关键：使用总队列深度
@@ -382,7 +425,9 @@ void CheckPfcCondition(uint32_t inPort, uint32_t priority)
 | `PopFromVoq()` | 包出队统计 | void | 更新双视图 |
 | `GetQueueIngressNonHeadroomBytes()` | Queue ingress 非 headroom 占用查询 | uint64_t | 流控决策 |
 | `GetOutPortBufferUsed()` | OutPort 占用查询 | uint64_t | 路由负载均衡 |
-| `GetTotalOutPortBufferUsed()` | OutPort 总占用 | uint64_t | CAQM 拥塞控制 |
+| `GetTotalOutPortBufferUsed()` | processing + VOQ | uint64_t | 既有 trace 统计 |
+| `GetOutPortBufferOccupancyBytes()` | processing + VOQ + egress | uint64_t | 缓冲占用观察 |
+| `GetOutPortQueueBacklogBytes()` | VOQ + egress | uint64_t | DCQCN/CAQM 拥塞反馈 |
 
 ### 7.3 注意事项
 
@@ -402,3 +447,22 @@ void CheckPfcCondition(uint32_t inPort, uint32_t priority)
 | `src/unified-bus/model/ub-switch.cc` | 包处理和调度逻辑 |
 | `src/unified-bus/model/ub-port.h` | UbPort 和 EgressQueue 定义 |
 | `src/unified-bus/model/protocol/ub-caqm.cc` | CAQM 拥塞控制实现 |
+
+## Reliable rerouting storage
+
+With reliable rerouting armed, retry packets and unsent failed-egress packets have already released
+their original ingress reservation. They enter the existing healthy-output VOQ without checking or
+charging that ingress again. A switch-local recovery tag records the failed-output origin. The
+allocator captures it for credit handling, and switch dequeue consumes it for queue accounting
+before the packet leaves this switch. The healthy next hop uses ordinary credit accounting.
+
+Actual VOQ/output backlog includes both ordinary and recovery packets. Ingress admission includes
+only ordinary reserved work; `recovery_voq_bytes` is a subset of actual buffered bytes, not a quantity
+to add again. Paper-dynamic PFC excludes this independently backed subset when computing capacity
+thresholds, while congestion-control output backlog remains inclusive. Old VOQ and delayed input
+processing packets retain their existing ingress reservation and return upstream credit once.
+
+Recovery has no separate scheduler or strict priority. Existing FIFO, VL/RR/DWRR, egress capacity
+checks and downstream credit remain authoritative. A blocked healthy egress leaves recovery in the
+shared VOQ. Draining the retry owner does not establish destination delivery or empty recovery VOQs.
+See ADR 0029 and `reliable-rerouting-buffer-accounting-validation.md` for validation.

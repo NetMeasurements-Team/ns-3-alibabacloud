@@ -525,7 +525,7 @@ UbFault::TryGetRetransFaultPacketInfo(Ptr<Packet> packet,
                                       uint32_t taskId,
                                       RetransFaultPacketInfo &info)
 {
-    Ptr<Packet> copy = packet->Copy();
+    Ptr<Packet> copy = CopyPacketView(packet);
     UbDatalinkPacketHeader dataLinkHeader;
     if (copy->GetSize() < dataLinkHeader.GetSerializedSize()) {
         return false;

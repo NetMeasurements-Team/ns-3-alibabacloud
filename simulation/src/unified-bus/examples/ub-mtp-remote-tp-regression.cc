@@ -23,6 +23,8 @@ constexpr uint32_t kJettyNum = 0;
 constexpr uint32_t kTaskId = 1;
 constexpr uint32_t kSenderTpn = 100;
 constexpr uint32_t kReceiverTpn = 200;
+constexpr uint32_t kRemoteLinkDelayNs = 10;
+constexpr uint32_t kTaskStartDelayNs = 10;
 constexpr auto kTpPriority = UB_PRIORITY_DEFAULT;
 
 enum class FlowControlMode
@@ -51,6 +53,14 @@ bool g_senderObservedAck = false;
 bool g_receiverObservedData = false;
 bool g_senderTaskComplete = false;
 bool g_enableCbfc = false;
+bool g_destroyAfterAdmission = false;
+bool g_closeStarted = false;
+bool g_newWorkRejected = false;
+bool g_jettyDestroyPending = false;
+bool g_connectionDestroyed = false;
+bool g_completionBeforeDestroy = false;
+Ptr<Node> g_sender;
+Ptr<Node> g_receiver;
 
 void
 TestLog(const std::string& message)
@@ -132,6 +142,57 @@ OnTpTaskCompleted(uint32_t taskId, uint32_t jettyNum)
     TestLog("Task complete");
 }
 
+void
+OnTpWqeCompleted(UbWqeCompletion completion)
+{
+    g_senderTaskComplete = completion.outcome == UbWorkOutcome::COMPLETED;
+    TestLog("Task complete");
+}
+
+void
+OnConnectionDestroyed(UbLifecycleResourceIdentity, UbDestroyStatus status)
+{
+    g_completionBeforeDestroy = g_senderTaskComplete;
+    g_connectionDestroyed = status == UbDestroyStatus::COMPLETED;
+    TestLog("Connection destroyed");
+}
+
+void
+BeginConnectionClose()
+{
+    Ptr<UbController> controller = g_sender->GetObject<UbController>();
+    Ptr<UbFunction> function = controller->GetUbFunction();
+    const UbDestroyStatus connectionStatus = controller->GetTpConnManager()->DestroyConnection(
+        g_sender->GetId(),
+        kSenderTpn,
+        UbDestroyReason::EXPLICIT,
+        MakeCallback(&OnConnectionDestroyed));
+    NS_ABORT_MSG_IF(connectionStatus != UbDestroyStatus::PENDING,
+                    "Admitted work must keep connection destroy pending");
+
+    Ptr<UbWqe> rejected = function->CreateWqe(g_sender->GetId(),
+                                              g_receiver->GetId(),
+                                              UB_MTU_BYTE,
+                                              kTaskId + 1,
+                                              UbTransactionOpcode::WRITE);
+    g_newWorkRejected =
+        function->SubmitWqe(rejected, kJettyNum).status != UbWqeSubmissionStatus::ACCEPTED;
+    const UbDestroyStatus jettyStatus = function->DestroyJetty(kJettyNum);
+    g_jettyDestroyPending = jettyStatus == UbDestroyStatus::PENDING;
+    TestLog("Connection close started");
+}
+
+void
+ObserveWqeSegmentAdmission(uint32_t, uint32_t taskId, uint32_t)
+{
+    if (!g_destroyAfterAdmission || taskId != kTaskId || g_closeStarted)
+    {
+        return;
+    }
+    g_closeStarted = true;
+    Simulator::ScheduleNow(&BeginConnectionClose);
+}
+
 Ptr<UbPort>
 CreatePort(Ptr<Node> node)
 {
@@ -175,8 +236,8 @@ AddShortestRoute(Ptr<Node> node, uint32_t destNodeId, uint32_t destPortId, uint1
 {
     std::vector<uint16_t> outPorts = {outPort};
     Ptr<UbRoutingProcess> routing = node->GetObject<UbSwitch>()->GetRoutingProcess();
-    routing->AddShortestRoute(NodeIdToIp(destNodeId).Get(), outPorts);
-    routing->AddShortestRoute(NodeIdToIp(destNodeId, destPortId).Get(), outPorts);
+    routing->GetRoutingTable().AddShortestRoute(NodeIdToIp(destNodeId).Get(), outPorts);
+    routing->GetRoutingTable().AddShortestRoute(NodeIdToIp(destNodeId, destPortId).Get(), outPorts);
 }
 
 HybridTpTopology
@@ -205,6 +266,9 @@ BuildTpTopology()
     topo.switch0DevicePort->Attach(leftLink);
 
     topo.remoteLink = CreateObject<UbRemoteLink>();
+    // A positive remote-link delay gives the hybrid runtime valid lookahead. This value belongs to
+    // the regression topology and is not a recommended UB link delay.
+    topo.remoteLink->SetAttribute("Delay", TimeValue(NanoSeconds(kRemoteLinkDelayNs)));
     topo.switch0RemotePort->Attach(topo.remoteLink);
     topo.switch1RemotePort->Attach(topo.remoteLink);
     topo.switch0RemotePort->EnableMpiReceive();
@@ -236,15 +300,45 @@ EnqueueTpWqe(Ptr<Node> sender, uint32_t receiverId, uint32_t flowSize)
 }
 
 void
-InstallStaticTpPair(const HybridTpTopology& topo)
+InstallStaticConnectionViews(const HybridTpTopology& topo)
 {
     Ptr<UbController> senderCtrl = topo.device0->GetObject<UbController>();
     Ptr<UbController> receiverCtrl = topo.device1->GetObject<UbController>();
 
-    if (!senderCtrl->IsTPExists(kSenderTpn))
+    Connection connection;
+    connection.ownerNodeId = topo.device0->GetId();
+    connection.node1 = topo.device0->GetId();
+    connection.port1 = topo.device0Port->GetIfIndex();
+    connection.tpn1 = kSenderTpn;
+    connection.node2 = topo.device1->GetId();
+    connection.port2 = topo.device1Port->GetIfIndex();
+    connection.tpn2 = kReceiverTpn;
+    connection.priority = kTpPriority;
+    Connection existing;
+    if (!senderCtrl->GetTpConnManager()->TryGetLocalConnection(connection.node1,
+                                                               connection.tpn1,
+                                                               existing))
+    {
+        senderCtrl->GetTpConnManager()->AddUnilateralConnection(connection, connection.node1);
+    }
+    if (!receiverCtrl->GetTpConnManager()->TryGetLocalConnection(connection.node2,
+                                                                 connection.tpn2,
+                                                                 existing))
+    {
+        receiverCtrl->GetTpConnManager()->AddUnilateralConnection(connection, connection.node2);
+    }
+}
+
+void
+InstallStaticTpEndpoint(uint32_t systemId, const HybridTpTopology& topo)
+{
+    Ptr<UbController> senderCtrl = topo.device0->GetObject<UbController>();
+    Ptr<UbController> receiverCtrl = topo.device1->GetObject<UbController>();
+
+    if (systemId == 0 && !senderCtrl->GetTransportChannelManager()->Contains(kSenderTpn))
     {
         Ptr<UbCongestionControl> senderCc = UbCongestionControl::Create(UB_DEVICE);
-        senderCtrl->CreateTp(topo.device0->GetId(),
+        senderCtrl->GetTransportChannelManager()->CreateTp(topo.device0->GetId(),
                              topo.device1->GetId(),
                              topo.device0Port->GetIfIndex(),
                              topo.device1Port->GetIfIndex(),
@@ -254,10 +348,43 @@ InstallStaticTpPair(const HybridTpTopology& topo)
                              senderCc);
     }
 
-    if (!receiverCtrl->IsTPExists(kReceiverTpn))
+    if (systemId == 1 && !receiverCtrl->GetTransportChannelManager()->Contains(kReceiverTpn))
     {
         Ptr<UbCongestionControl> receiverCc = UbCongestionControl::Create(UB_DEVICE);
-        receiverCtrl->CreateTp(topo.device1->GetId(),
+        receiverCtrl->GetTransportChannelManager()->CreateTp(topo.device1->GetId(),
+                               topo.device0->GetId(),
+                               topo.device1Port->GetIfIndex(),
+                               topo.device0Port->GetIfIndex(),
+                               kTpPriority,
+                               kReceiverTpn,
+                               kSenderTpn,
+                               receiverCc);
+    }
+}
+
+void
+InstallStaticTpPair(const HybridTpTopology& topo)
+{
+    Ptr<UbController> senderCtrl = topo.device0->GetObject<UbController>();
+    Ptr<UbController> receiverCtrl = topo.device1->GetObject<UbController>();
+
+    if (!senderCtrl->GetTransportChannelManager()->Contains(kSenderTpn))
+    {
+        Ptr<UbCongestionControl> senderCc = UbCongestionControl::Create(UB_DEVICE);
+        senderCtrl->GetTransportChannelManager()->CreateTp(topo.device0->GetId(),
+                             topo.device1->GetId(),
+                             topo.device0Port->GetIfIndex(),
+                             topo.device1Port->GetIfIndex(),
+                             kTpPriority,
+                             kSenderTpn,
+                             kReceiverTpn,
+                             senderCc);
+    }
+
+    if (!receiverCtrl->GetTransportChannelManager()->Contains(kReceiverTpn))
+    {
+        Ptr<UbCongestionControl> receiverCc = UbCongestionControl::Create(UB_DEVICE);
+        receiverCtrl->GetTransportChannelManager()->CreateTp(topo.device1->GetId(),
                                topo.device0->GetId(),
                                topo.device1Port->GetIfIndex(),
                                topo.device0Port->GetIfIndex(),
@@ -291,8 +418,8 @@ PrepareTpFlow(Ptr<Node> sender, uint32_t receiverId, uint32_t flowSize)
 void
 SetupTpMode(uint32_t systemId, const HybridTpTopology& topo, uint32_t flowSize)
 {
-    Ptr<UbTransportChannel> senderTp = topo.device0->GetObject<UbController>()->GetTpByTpn(kSenderTpn);
-    Ptr<UbTransportChannel> receiverTp = topo.device1->GetObject<UbController>()->GetTpByTpn(kReceiverTpn);
+    Ptr<UbTransportChannel> senderTp = topo.device0->GetObject<UbController>()->GetTransportChannelManager()->GetTp(kSenderTpn);
+    Ptr<UbTransportChannel> receiverTp = topo.device1->GetObject<UbController>()->GetTransportChannelManager()->GetTp(kReceiverTpn);
     NS_ABORT_MSG_IF(senderTp == nullptr, "Failed to get sender TP");
     NS_ABORT_MSG_IF(receiverTp == nullptr, "Failed to get receiver TP");
     senderTp->TraceConnectWithoutContext("TpRecvNotify", MakeCallback(&ObserveSenderTpRecv));
@@ -300,7 +427,63 @@ SetupTpMode(uint32_t systemId, const HybridTpTopology& topo, uint32_t flowSize)
 
     if (systemId == 0)
     {
-        Simulator::Schedule(NanoSeconds(10), &PrepareTpFlow, topo.device0, topo.device1->GetId(), flowSize);
+        Simulator::Schedule(NanoSeconds(kTaskStartDelayNs),
+                            &PrepareTpFlow,
+                            topo.device0,
+                            topo.device1->GetId(),
+                            flowSize);
+    }
+}
+
+void
+PrepareDestroyTpFlow(Ptr<Node> sender, uint32_t receiverId, uint32_t flowSize)
+{
+    Ptr<UbController> controller = sender->GetObject<UbController>();
+    Ptr<UbFunction> function = controller->GetUbFunction();
+    Ptr<UbTransaction> transaction = controller->GetUbTransaction();
+
+    function->CreateJetty(sender->GetId(), receiverId, kJettyNum);
+    const bool bindOk = transaction->JettyBindTp(sender->GetId(),
+                                                 receiverId,
+                                                 kJettyNum,
+                                                 false,
+                                                 {kSenderTpn});
+    NS_ABORT_MSG_IF(!bindOk, "Failed to bind delayed-destroy Jetty to TP");
+    Ptr<UbJetty> jetty = function->GetJetty(kJettyNum);
+    jetty->SetTaSegmentBytes(UB_WQE_TA_SEGMENT_BYTE / 2);
+    jetty->SetWqeCompletionCallback(MakeCallback(&OnTpWqeCompleted));
+    controller->GetTransportChannelManager()
+        ->GetTp(kSenderTpn)
+        ->TraceConnectWithoutContext("WqeSegmentSendsNotify",
+                                     MakeCallback(&ObserveWqeSegmentAdmission));
+
+    Ptr<UbWqe> wqe = function->CreateWqe(sender->GetId(),
+                                         receiverId,
+                                         flowSize,
+                                         kTaskId,
+                                         UbTransactionOpcode::WRITE);
+    NS_ABORT_MSG_IF(function->SubmitWqe(wqe, kJettyNum).status !=
+                        UbWqeSubmissionStatus::ACCEPTED,
+                    "Failed to submit delayed-destroy WRITE");
+    TestLog("TP mode start");
+}
+
+void
+SetupDestroyTpMode(uint32_t systemId, const HybridTpTopology& topo, uint32_t flowSize)
+{
+    InstallStaticTpEndpoint(systemId, topo);
+    if (systemId == 0)
+    {
+        Ptr<UbTransportChannel> senderTp = topo.device0->GetObject<UbController>()
+                                               ->GetTransportChannelManager()
+                                               ->GetTp(kSenderTpn);
+        senderTp->SetMaxQueueSizeForTest(1);
+        senderTp->TraceConnectWithoutContext("TpRecvNotify", MakeCallback(&ObserveSenderTpRecv));
+        Simulator::Schedule(NanoSeconds(kTaskStartDelayNs + kRemoteLinkDelayNs),
+                            &PrepareDestroyTpFlow,
+                            topo.device0,
+                            topo.device1->GetId(),
+                            flowSize);
     }
 }
 } // namespace
@@ -309,6 +492,7 @@ int
 main(int argc, char* argv[])
 {
     bool testing = false;
+    bool destroyAfterAdmission = false;
     uint32_t mtpThreads = 2;
     uint32_t flowSize = UB_MTU_BYTE;
     uint32_t stopMs = 20;
@@ -317,6 +501,9 @@ main(int argc, char* argv[])
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("test", "Enable deterministic smoke output", testing);
+    cmd.AddValue("destroy-after-admission",
+                 "Destroy the TP connection after its first admitted segment",
+                 destroyAfterAdmission);
     cmd.AddValue("mtp-threads", "Number of MTP threads to use", mtpThreads);
     cmd.AddValue("mode", "Smoke mode; only 'tp' is supported", mode);
     cmd.AddValue("flow-control", "Flow control mode: none or cbfc", flowControl);
@@ -325,6 +512,7 @@ main(int argc, char* argv[])
     cmd.Parse(argc, argv);
 
     g_test = testing;
+    g_destroyAfterAdmission = destroyAfterAdmission;
     FlowControlMode flowControlMode = ParseFlowControlMode(flowControl);
 
     if (mtpThreads < 1)
@@ -332,7 +520,10 @@ main(int argc, char* argv[])
         mtpThreads = 1;
     }
 
-    MtpInterface::Enable(mtpThreads);
+    if (!destroyAfterAdmission || mtpThreads > 1)
+    {
+        MtpInterface::Enable(mtpThreads);
+    }
     MpiInterface::Enable(&argc, &argv);
 
     const uint32_t systemId = MpiInterface::GetSystemId();
@@ -378,16 +569,85 @@ main(int argc, char* argv[])
         TestLog("CBFC enabled");
     }
     HybridTpTopology topo = BuildTpTopology();
-    InstallStaticTpPair(topo);
+    if (destroyAfterAdmission)
+    {
+        MpiInterface::BoundLookAhead(NanoSeconds(kRemoteLinkDelayNs));
+        g_sender = topo.device0;
+        g_receiver = topo.device1;
+        InstallStaticConnectionViews(topo);
+        const uint32_t localNodeId =
+            systemId == 0 ? topo.device0->GetId() : topo.device1->GetId();
+        Simulator::ScheduleWithContext(localNodeId,
+                                       NanoSeconds(1),
+                                       &SetupDestroyTpMode,
+                                       systemId,
+                                       topo,
+                                       flowSize);
+    }
+    else
+    {
+        InstallStaticTpPair(topo);
+    }
 
     TestLog(std::string("Rank ") + std::to_string(systemId) + " initialized");
-    SetupTpMode(systemId, topo, flowSize);
+    if (!destroyAfterAdmission)
+    {
+        SetupTpMode(systemId, topo, flowSize);
+    }
 
     Simulator::Stop(MilliSeconds(stopMs));
     Simulator::Run();
+
+    if (destroyAfterAdmission)
+    {
+        Connection ignored;
+        const bool senderViewPresent = topo.device0->GetObject<UbController>()
+                                           ->GetTpConnManager()
+                                           ->TryGetLocalConnection(
+                                               topo.device0->GetId(),
+                                               kSenderTpn,
+                                               ignored);
+        const bool receiverViewPresent = topo.device1->GetObject<UbController>()
+                                             ->GetTpConnManager()
+                                             ->TryGetLocalConnection(
+                                                 topo.device1->GetId(),
+                                                 kReceiverTpn,
+                                                 ignored);
+        const bool localPassed =
+            systemId == 0
+                ? g_senderObservedAck && g_senderTaskComplete && g_closeStarted &&
+                      g_newWorkRejected && g_jettyDestroyPending && g_connectionDestroyed &&
+                      g_completionBeforeDestroy && !senderViewPresent
+                : !receiverViewPresent;
+        int localResult = localPassed ? 1 : 0;
+        int globalResult = localResult;
+        MPI_Allreduce(&localResult,
+                      &globalResult,
+                      1,
+                      MPI_INT,
+                      MPI_MIN,
+                      MpiInterface::GetCommunicator());
+        if (testing)
+        {
+            std::cout << "TEST : " << systemId << " : "
+                      << (globalResult ? "PASSED" : "FAILED") << " local=" << localResult
+                      << " ack=" << g_senderObservedAck << " task=" << g_senderTaskComplete
+                      << " close=" << g_closeStarted << " rejected=" << g_newWorkRejected
+                      << " destroyed=" << g_connectionDestroyed
+                      << " sender-view=" << senderViewPresent
+                      << " receiver-view=" << receiverViewPresent << std::endl;
+        }
+        Simulator::Destroy();
+        MpiInterface::Disable();
+        if (!globalResult)
+        {
+            return systemId == 0 ? 4 : 6;
+        }
+        return 0;
+    }
+
     Simulator::Destroy();
     MpiInterface::Disable();
-
     if (systemId == 0)
     {
         if (!g_senderObservedAck)
@@ -402,13 +662,10 @@ main(int argc, char* argv[])
         }
         TestLog("PASS");
     }
-    else if (systemId == 1)
+    else if (systemId == 1 && !g_receiverObservedData)
     {
-        if (!g_receiverObservedData)
-        {
-            std::cerr << "Rank 1 did not observe TP data" << std::endl;
-            return 6;
-        }
+        std::cerr << "Rank 1 did not observe TP data" << std::endl;
+        return 6;
     }
 
     return 0;

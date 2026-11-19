@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #ifndef UB_TAG_H
 #define UB_TAG_H
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
-#include <ns3/tag.h>
+#include "ns3/tag.h"
 
 namespace ns3 {
 
@@ -19,10 +20,12 @@ enum class PacketType {
   * @brief UbPacketTraceTag use this struct to record path.
   */
 struct PortTrace {
-    uint32_t recvPort;
-    uint64_t recvTime;
-    uint32_t sendPort;
-    uint64_t sendTime;
+    // A path endpoint may only have a send or receive observation. Keep the
+    // missing side explicit so trace consumers do not mistake it for port 0.
+    uint32_t recvPort{UINT32_MAX};
+    uint64_t recvTime{0};
+    uint32_t sendPort{UINT32_MAX};
+    uint64_t sendTime{0};
 
     bool operator()(const PortTrace& p1, const PortTrace& p2) const
     {
@@ -172,7 +175,7 @@ public:
         if (m_portTrace.find(node) != m_portTrace.end()) {
             return m_portTrace[node];
         } else {
-            return {0};
+            return {};
         }
     }
 
@@ -277,6 +280,97 @@ public:
 private:
     uint32_t m_flowId{0};
     uint32_t m_flowSize{0};
+};
+
+/**
+ * @brief Marks a transport packet whose bytes originate from a caller-provided WRITE payload.
+ *
+ * The marker is transport-private. It distinguishes caller-provided bytes from synthetic
+ * size-only carrier bytes without changing the packet's wire length.
+ */
+class UbExplicitPayloadTag : public Tag
+{
+  public:
+    static TypeId GetTypeId()
+    {
+        static TypeId tid = TypeId("ns3::UbExplicitPayloadTag")
+                                .SetParent<Tag>()
+                                .AddConstructor<UbExplicitPayloadTag>();
+        return tid;
+    }
+
+    TypeId GetInstanceTypeId() const override
+    {
+        return GetTypeId();
+    }
+
+    uint32_t GetSerializedSize() const override
+    {
+        return 1;
+    }
+
+    void Serialize(TagBuffer i) const override
+    {
+        i.WriteU8(m_marker);
+    }
+
+    void Deserialize(TagBuffer i) override
+    {
+        m_marker = i.ReadU8();
+    }
+
+    void Print(std::ostream& os) const override
+    {
+        os << "ExplicitPayload:" << static_cast<uint32_t>(m_marker);
+    }
+
+  private:
+    uint8_t m_marker{1};
+};
+
+/**
+ * @brief Marks a recovered packet whose original upstream credit was already returned.
+ *
+ * The tag is local to the switch that owns the recovery transfer: the allocator consumes it when
+ * the recovered packet leaves its healthy VOQ, so it never reaches a later hop and never changes
+ * serialized bytes.
+ */
+class UbRecoveredCreditTag : public Tag
+{
+  public:
+    static TypeId GetTypeId()
+    {
+        static TypeId tid = TypeId("ns3::UbRecoveredCreditTag")
+                                .SetParent<Tag>()
+                                .AddConstructor<UbRecoveredCreditTag>();
+        return tid;
+    }
+
+    TypeId GetInstanceTypeId() const override
+    {
+        return GetTypeId();
+    }
+
+    uint32_t GetSerializedSize() const override
+    {
+        return 4;
+    }
+
+    void Serialize(TagBuffer i) const override
+    {
+        i.WriteU32(failedOutput);
+    }
+
+    void Deserialize(TagBuffer i) override
+    {
+        failedOutput = i.ReadU32();
+    }
+
+    void Print(std::ostream& os) const override
+    {
+        os << "RecoveredPacketWithReturnedCredit origin=" << failedOutput;
+    }
+    uint32_t failedOutput{UINT32_MAX};
 };
 
 }

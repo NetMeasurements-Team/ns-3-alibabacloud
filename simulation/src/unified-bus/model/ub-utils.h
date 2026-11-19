@@ -2,50 +2,161 @@
 #ifndef UTILS_H
 #define UTILS_H
 
-#include <iostream>
-#include <sstream>
-#include <chrono>
-#include <functional>
-#include <map>
-#include <fstream>
-#include <mutex>
-#include <tuple>
-#include <vector>
+#include "ub-tp-connection-manager.h"
+
+#include "ns3/config-store.h"
 #include "ns3/core-module.h"
-#include "ns3/singleton.h"
-#include "ns3/ub-transaction.h"
-#include "ns3/ub-controller.h"
-#include "ns3/ub-transport.h"
-#include "ns3/ub-ctp.h"
-#include "ns3/ub-link.h"
-#include "ns3/ub-port.h"
-#include "ns3/ptr.h"
+#include "ns3/enum.h"
+#include "ns3/internet-module.h"
+#include "ns3/ipv4-static-routing-helper.h"
+#include "ns3/ub-reliable-rerouting.h"
+#include "ns3/network-module.h"
 #include "ns3/object-factory.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/ptr.h"
+#include "ns3/random-variable-stream.h"
+#include "ns3/singleton.h"
+#include "ns3/ub-app.h"
+#include "ns3/ub-caqm.h"
+#include "ns3/ub-controller.h"
+#include "ns3/ub-fault.h"
+#include "ns3/ub-link.h"
+#include "ns3/ub-network-address.h"
+#include "ns3/ub-port.h"
+#include "ns3/ub-rule-routing.h"
+#include "ns3/ub-lifecycle-trace.h"
 #include "ns3/ub-switch.h"
 #include "ns3/ub-traffic-gen.h"
-#include "ns3/ub-app.h"
-#include "ns3/network-module.h"
-#include "ns3/internet-module.h"
-#include "ns3/point-to-point-module.h"
-#include "ns3/ipv4-static-routing-helper.h"
-#include "ns3/config-store.h"
-#include "ns3/ub-caqm.h"
-#include "ns3/ub-network-address.h"
-#include "ub-tp-connection-manager.h"
-#include "ns3/random-variable-stream.h"
-#include "ns3/enum.h"
-#include "ns3/ub-fault.h"
+#include "ns3/ub-transaction.h"
+#include "ns3/ub-transport.h"
+
+#include <atomic>
+#include <chrono>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <tuple>
+#include <vector>
 
 class UbLinkDelayOffsetTest;
 
+namespace ns3
+{
+class UbNextHopIndex;
+}
+
 namespace utils {
 class UbTraceFileConcurrencyTest;
+class UbTraceWriterBoundedTest;
+class UbTraceWriterDescriptorLruTest;
 class UbQueueSamplerEventRetentionTest;
+
+struct UbStructuredNodeConfig
+{
+    uint32_t nodeId;
+    std::string nodeType;
+    uint32_t portCount;
+    std::string allocationDelay;
+    std::string forwardDelay;
+    uint32_t systemId{0};
+};
+
+struct UbStructuredLinkConfig
+{
+    uint32_t node1;
+    uint32_t port1;
+    uint32_t node2;
+    uint32_t port2;
+    std::string bandwidth;
+    std::string delay;
+};
+
+struct UbStructuredTableRoute
+{
+    uint32_t currentNodeId;
+    uint32_t destinationNodeId;
+    uint32_t destinationPortId;
+    std::vector<uint16_t> shortestPorts;
+    std::vector<uint16_t> nonShortestPorts;
+};
+
+struct UbStructuredTopologyConfig
+{
+    std::vector<UbStructuredNodeConfig> nodes;
+    std::vector<UbStructuredLinkConfig> links;
+    std::vector<UbStructuredTableRoute> tableRoutes;
+    uint64_t tableRouteCount{0};
+    std::shared_ptr<const ns3::UbNextHopIndex> tableNextHopIndex;
+    std::vector<ns3::UbPortGroup> portGroups;
+    std::vector<ns3::UbRoutingRule> routingRules;
+    std::vector<ns3::UbRoutingRangeRule> routingRangeRules;
+    std::vector<ns3::UbTopologyRule> topologyRules;
+    std::string routingFingerprint;
+};
+
+struct UbTraceWriterStorageSnapshot
+{
+    uint64_t ownerCount{0};
+    uint64_t fileCount{0};
+    uint64_t openFileCount{0};
+    uint64_t currentBufferedBytes{0};
+    uint64_t maxOwnerBufferedBytes{0};
+    uint64_t openCount{0};
+    uint64_t writeCount{0};
+    uint64_t flushCount{0};
+    uint64_t closeCount{0};
+    uint64_t lruCloseCount{0};
+    uint64_t pressureFlushCount{0};
+    uint64_t peakOpenFiles{0};
+    uint64_t peakBufferedBytes{0};
+};
+
+struct UbRuntimeStorageSnapshot
+{
+    static constexpr uint32_t SCHEMA_VERSION = 1;
+
+    uint64_t nodeCount{0};
+    uint64_t canonicalConnections{0};
+    uint64_t authoritativeLocalConnectionViews{0};
+    uint64_t secondaryConnectionIndexEntries{0};
+    uint64_t residentTpEndpoints{0};
+    uint64_t reservedEndpointSlots{0};
+    uint64_t taskScopedJetties{0};
+    uint64_t reusableJetties{0};
+    uint64_t simulatorEventCount{0};
+    uint64_t residentWqes{0};
+    uint64_t residentOperations{0};
+    uint64_t residentSegments{0};
+    uint64_t activeLdstTasks{0};
+    uint64_t activeLdstSegments{0};
+    uint64_t storedTrafficTasks{0};
+    uint64_t completedTrafficTasks{0};
+    uint64_t trafficDependencyReferences{0};
+    ns3::UbLifecycleStorageSnapshot lifecycle;
+    UbTraceWriterStorageSnapshot traceWriter;
+};
 /**
  *  @brief UbUtils单例类
  */
 class UbUtils : public ns3::Singleton<UbUtils> {
 public:
+  struct TraceSinkHandle
+  {
+      bool IsValid() const
+      {
+          return state != nullptr;
+      }
+
+    private:
+      friend class UbUtils;
+      void* state{nullptr};
+      uint64_t epoch{0};
+  };
+
     // Runtime / trace lifecycle helpers used by examples and tests.
     void PrintTimestamp(const std::string &message);
 
@@ -59,6 +170,16 @@ public:
 
     static void SetTracePathForTest(const std::string& tracePath);
 
+    static TraceSinkHandle ResolveTraceSink(const std::string& fileName);
+
+    static void AppendTraceInfoNoTs(const TraceSinkHandle& sink, const std::string& info);
+
+    static UbTraceWriterStorageSnapshot GetTraceWriterStorageSnapshot();
+
+    static UbRuntimeStorageSnapshot CaptureRuntimeStorageSnapshot();
+
+    static void WriteRuntimeStorageSnapshot(const std::string& outputPath);
+
     // MPI locality helpers used by config-driven builder/tests.
     static uint32_t ExtractMpiRank(uint32_t systemId);
 
@@ -68,6 +189,8 @@ public:
 
     // Config-driven builder surface used by ub-quick-example and white-box tests.
     void CreateNode(const std::string &filename);
+
+    void CreateNode(const std::vector<UbStructuredNodeConfig>& nodes);
 
     // Loads traffic records and initializes phase-dependency state in UbTrafficGen.
     std::vector<TrafficRecord> LoadTrafficConfig(const std::string &filename);
@@ -106,11 +229,42 @@ public:
                                     ns3::Time offsetWindow,
                                     uint32_t offsetSeed);
 
+    LinkDelayOffsetStats CreateTopo(const std::vector<UbStructuredLinkConfig>& links,
+                                    ns3::Time offsetWindow,
+                                    uint32_t offsetSeed);
+
     void AddRoutingTable(const std::string &filename);
 
-    void CreateTp(const std::string &filename);
+    void AddRoutingTable(const std::vector<UbStructuredTableRoute>& routes);
 
-    void SetComponentsAttribute(const std::string &filename);
+    void AddRuleRoutingTable(const std::string& portGroupFilename,
+                             const std::string& ruleFilename,
+                             const std::string& rangeRuleFilename = "");
+
+    void AddRuleRoutingTable(const std::vector<ns3::UbPortGroup>& portGroups,
+                             const std::vector<ns3::UbRoutingRule>& routingRules,
+                             const std::vector<ns3::UbRoutingRangeRule>& routingRangeRules = {},
+                             const std::vector<ns3::UbTopologyLink>& topologyLinks = {},
+                             const std::vector<ns3::UbTopologyRule>& topologyRules = {});
+
+    static UbStructuredTopologyConfig ReadStructuredTopologyConfig(std::istream& input);
+
+    LinkDelayOffsetStats InstallStructuredTopology(const UbStructuredTopologyConfig& config,
+                                                   ns3::Time offsetWindow,
+                                                   uint32_t offsetSeed);
+
+    void CreateTp(const std::string& filename);
+
+    /**
+     * @brief Provision and freeze the standard Host CTP Entity registries.
+     *
+     * The runner-only setup creates Entity 1 on each UB_DEVICE host and binds every local
+     * CNA16-encodable UB port. Additional Entity definitions remain a controller API concern;
+     * there is no case-file input for them.
+     */
+    void CreateDefaultCtpEntities();
+
+    void SetComponentsAttribute(const std::string& filename);
 
     // Runtime trace wiring / attribute query / fault helpers.
     void TopoTraceConnect();
@@ -138,28 +292,32 @@ public:
     static void CbfcStateNotify(uint32_t nodeId,
                                 uint32_t portId,
                                 const std::string& action,
-                                uint32_t priority,
+                                uint32_t vl,
                                 int32_t availableCredits,
-                                uint32_t nextPacketBytes);
+                                uint32_t nextPacketBytes,
+                                uint32_t creditCellBytes);
 
     static void CbfcCreditRestoreTraceNotify(uint32_t nodeId,
                                              uint32_t portId,
-                                             const std::vector<uint8_t>& credits);
+                                             const std::vector<int32_t>& creditCells,
+                                             uint32_t creditCellBytes);
 
     static void CbfcCreditLevelNotify(uint32_t nodeId,
                                       uint32_t portId,
                                       const std::string& reason,
-                                      uint32_t priority,
+                                      uint32_t vl,
                                       int32_t availableCredits,
-                                      int32_t deltaCredits);
+                                      int32_t deltaCredits,
+                                      uint32_t creditCellBytes);
 
     static void CbfcControlSendNotify(uint32_t nodeId,
                                       uint32_t portId,
                                       const std::string& reason,
                                       int32_t triggerThresholdCells,
                                       int32_t emitMinPendingCells,
-                                      const std::vector<int32_t>& pendingCredits,
-                                      const std::vector<uint8_t>& sendCredits);
+                                      const std::vector<int32_t>& pendingCreditCells,
+                                      const std::vector<int32_t>& sendCreditCells,
+                                      uint32_t creditCellBytes);
 
     static void DcqcnMarkNotify(uint32_t nodeId,
                                 uint32_t outPort,
@@ -210,6 +368,24 @@ public:
 
     static bool IsTpDebugEnabledFor(uint32_t nodeId, uint32_t tpn);
 
+    static void TpgPhaseCreateNotify(uint32_t srcNode,
+                                     uint32_t dstNode,
+                                     uint32_t taskId,
+                                     uint32_t memberCount,
+                                     uint32_t initialIndex,
+                                     uint16_t initialPort,
+                                     const std::vector<uint16_t>& memberPorts,
+                                     const std::string& strategy);
+
+    /**
+     * @brief Trace sink for reliable-rerouting events.
+     *
+     * Writes `output/reliable_rerouting.csv` through the existing buffered trace writer when the
+     * packet-trace category is enabled. Correctness and counters never depend on this sink.
+     */
+    static void ReliableReroutingNotify(const UbReliableReroutingEvent& record);
+    static void ReliableReroutingOccupancyNotify(const UbRecoveryOccupancyEvent& record, bool summary);
+
     static void TpDebugStateNotify(uint32_t nodeId,
                                    uint32_t tpn,
                                    const std::string& reason,
@@ -243,6 +419,8 @@ public:
 
 private:
     friend class ::utils::UbTraceFileConcurrencyTest;
+    friend class ::utils::UbTraceWriterBoundedTest;
+    friend class ::utils::UbTraceWriterDescriptorLruTest;
     friend class ::utils::UbQueueSamplerEventRetentionTest;
     friend class ::UbLinkDelayOffsetTest;
 
@@ -256,18 +434,61 @@ private:
 
     struct TraceFileState
     {
+        std::string fileName;
         std::ofstream stream;
-        std::string pending;
         std::mutex mutex;
+        uint64_t lastUse{0};
+        uint32_t activeWrites{0};
+        bool headerWritten{false};
+        bool headerCommitted{false};
+        std::string csvHeader;
+        bool open{false};
     };
 
-    static constexpr std::size_t TRACE_FLUSH_THRESHOLD_BYTES = 16 * 1024;
+    struct TraceOwnerState
+    {
+        std::mutex mutex;
+        std::map<TraceFileState*, std::string> chunks;
+        std::size_t bufferedBytes{0};
+    };
+
+    struct TraceWriterConfig
+    {
+        std::size_t chunkBytes;
+        std::size_t highWaterBytes;
+        std::size_t lowWaterBytes;
+        std::size_t maxOpenFiles;
+        std::size_t effectiveMaxOpenFiles;
+    };
+
+    struct TraceWriterStats
+    {
+        uint64_t openCount;
+        uint64_t writeCount;
+        uint64_t flushCount;
+        uint64_t closeCount;
+        uint64_t lruCloseCount;
+        uint64_t pressureFlushCount;
+        std::size_t peakOpenFiles;
+        std::size_t peakBufferedBytes;
+    };
 
     // Runtime trace state shared by current process.
     inline static std::string trace_path;
 
-    inline static std::map<std::string, TraceFileState> files;  // 存储文件名和对应的文件句柄/缓冲
+    inline static std::map<std::string, TraceFileState> files;
+    inline static std::map<uint32_t, TraceOwnerState> trace_owners;
     inline static std::mutex files_mutex;
+    inline static TraceWriterConfig trace_writer_config{64 * 1024,
+                                                        1024 * 1024,
+                                                        512 * 1024,
+                                                        1024,
+                                                        256};
+    inline static TraceWriterStats trace_writer_stats{};
+    inline static bool trace_writer_configured = false;
+    inline static std::size_t trace_open_files = 0;
+    inline static uint64_t trace_lru_clock = 0;
+    inline static std::atomic<uint64_t> trace_writer_epoch{1};
     inline static std::mutex runtime_drop_mutex;
     inline static uint64_t runtime_packet_drop_count = 0;
     inline static std::string runtime_packet_drop_reason;
@@ -287,7 +508,9 @@ private:
        PRIORITY,
        DELAY,
        PHASEID,
-       DEPENDONPHASES
+       DEPENDONPHASES,
+       SRCPORTID,
+       DSTPORTID
     };
 
     struct NodeEle {
@@ -319,6 +542,48 @@ private:
                                                        "Master switch for all traces",
                                                        ns3::BooleanValue(true),
                                                        ns3::MakeBooleanChecker());
+
+    ns3::GlobalValue g_tpg_phase_hash_enable =
+        ns3::GlobalValue("UB_TPG_PHASE_HASH_ENABLE",
+                         "Use a seeded hash for the initial RTP TPG TP cursor.",
+                         ns3::BooleanValue(false),
+                         ns3::MakeBooleanChecker());
+
+    ns3::GlobalValue g_tpg_phase_seed =
+        ns3::GlobalValue("UB_TPG_PHASE_SEED",
+                         "Seed for the initial RTP TPG TP cursor hash.",
+                         ns3::UintegerValue(0),
+                         ns3::MakeUintegerChecker<uint32_t>());
+
+    ns3::GlobalValue g_tpg_phase_trace_enable =
+        ns3::GlobalValue("UB_TPG_PHASE_TRACE_ENABLE",
+                         "Enable initialization-only RTP TPG phase traces.",
+                         ns3::BooleanValue(false),
+                         ns3::MakeBooleanChecker());
+
+    ns3::GlobalValue g_routing_rr_phase_hash_enable =
+        ns3::GlobalValue("UB_ROUTING_RR_PHASE_HASH_ENABLE",
+                         "Use a seeded hash for the initial routing RR candidate index.",
+                         ns3::BooleanValue(false),
+                         ns3::MakeBooleanChecker());
+
+    ns3::GlobalValue g_routing_rr_phase_seed =
+        ns3::GlobalValue("UB_ROUTING_RR_PHASE_SEED",
+                         "Seed for the initial routing RR candidate index hash.",
+                         ns3::UintegerValue(0),
+                         ns3::MakeUintegerChecker<uint32_t>());
+
+    ns3::GlobalValue g_allocator_rr_phase_hash_enable =
+        ns3::GlobalValue("UB_ALLOCATOR_RR_PHASE_HASH_ENABLE",
+                         "Use a seeded hash for the initial allocator RR ingress index.",
+                         ns3::BooleanValue(false),
+                         ns3::MakeBooleanChecker());
+
+    ns3::GlobalValue g_allocator_rr_phase_seed =
+        ns3::GlobalValue("UB_ALLOCATOR_RR_PHASE_SEED",
+                         "Seed for the initial allocator RR ingress index hash.",
+                         ns3::UintegerValue(0),
+                         ns3::MakeUintegerChecker<uint32_t>());
 
     ns3::GlobalValue g_task_trace_enable = ns3::GlobalValue("UB_TASK_TRACE_ENABLE",
                                                             "Enable task and WQE level traces",
@@ -362,6 +627,54 @@ private:
                      "Enable queue trace files such as QueueTrace_* from event-driven updates and sampling.",
                      ns3::BooleanValue(false),
                      ns3::MakeBooleanChecker());
+
+    ns3::GlobalValue g_trace_preset =
+    ns3::GlobalValue("UB_TRACE_PRESET",
+                     "Trace category preset: minimal, balanced, detailed, or custom.",
+                     ns3::StringValue("minimal"),
+                     ns3::MakeStringChecker());
+
+    ns3::GlobalValue g_lifecycle_trace_level =
+    ns3::GlobalValue("UB_LIFECYCLE_TRACE_LEVEL",
+                     "Lifecycle trace level override: OFF, SUMMARY, EVENT, or DETAIL.",
+                     ns3::StringValue(""),
+                     ns3::MakeStringChecker());
+
+    ns3::GlobalValue g_lifecycle_detail_sample_stride =
+    ns3::GlobalValue("UB_LIFECYCLE_DETAIL_SAMPLE_STRIDE",
+                     "Retain one complete lifecycle identity chain per deterministic stride.",
+                     ns3::UintegerValue(1),
+                     ns3::MakeUintegerChecker<uint64_t>(1));
+
+    ns3::GlobalValue g_lifecycle_detail_sample_offset =
+    ns3::GlobalValue("UB_LIFECYCLE_DETAIL_SAMPLE_OFFSET",
+                     "Selected identity remainder within the lifecycle detail sample stride.",
+                     ns3::UintegerValue(0),
+                     ns3::MakeUintegerChecker<uint64_t>());
+
+    ns3::GlobalValue g_trace_chunk_bytes =
+        ns3::GlobalValue("UB_TRACE_CHUNK_BYTES",
+                         "Maximum unfinished trace bytes per execution owner and sink.",
+                         ns3::UintegerValue(64 * 1024),
+                         ns3::MakeUintegerChecker<uint64_t>(1024));
+
+    ns3::GlobalValue g_trace_owner_high_water_bytes =
+        ns3::GlobalValue("UB_TRACE_OWNER_HIGH_WATER_BYTES",
+                         "Execution-owner trace buffer high-water mark.",
+                         ns3::UintegerValue(1024 * 1024),
+                         ns3::MakeUintegerChecker<uint64_t>(1024));
+
+    ns3::GlobalValue g_trace_owner_low_water_bytes =
+        ns3::GlobalValue("UB_TRACE_OWNER_LOW_WATER_BYTES",
+                         "Execution-owner trace buffer pressure-flush target.",
+                         ns3::UintegerValue(512 * 1024),
+                         ns3::MakeUintegerChecker<uint64_t>());
+
+    ns3::GlobalValue g_trace_max_open_files =
+        ns3::GlobalValue("UB_TRACE_MAX_OPEN_FILES",
+                         "Configured process-wide trace file descriptor maximum.",
+                         ns3::UintegerValue(1024),
+                         ns3::MakeUintegerChecker<uint64_t>(1));
 
     ns3::GlobalValue g_python_script_path =
     ns3::GlobalValue("UB_PYTHON_SCRIPT_PATH",
@@ -427,7 +740,25 @@ private:
 
     static TraceFileState& GetTraceFile(const std::string& fileName);
 
+    static TraceSinkHandle GetCachedTraceSink(const std::string& fileName);
+
+    static TraceOwnerState& GetTraceOwner(uint32_t ownerId);
+
+    static void AppendTraceLine(const TraceSinkHandle& sink, std::string line);
+
+    static void AppendCsvRow(const std::string& fileName,
+                             const std::string& header,
+                             const std::string& row);
+
+    static void CommitTraceChunk(TraceFileState& fileState, std::string& chunk);
+
+    static void FlushTraceOwner(TraceOwnerState& owner);
+
     static void FlushTraceFile(TraceFileState& fileState);
+
+    static void ConfigureTraceWriter();
+
+    static void CloseTraceFile(TraceFileState& fileState, bool lruClose);
 
     static void QueueSampleNotify(uint32_t nodeId, uint32_t portId);
     static void QueueSampleTick(uint32_t nodeId, uint32_t portId, uint32_t intervalNs);
@@ -467,6 +798,12 @@ private:
     static void DagMemTaskStartsNotify(uint32_t nodeId, uint32_t taskId);
 
     static void DagMemTaskCompletesNotify(uint32_t nodeId, uint32_t taskId);
+
+    static void DagComputeTaskQueuedNotify(uint32_t nodeId, uint32_t taskId);
+
+    static void DagComputeTaskStartsNotify(uint32_t nodeId, uint32_t taskId);
+
+    static void DagComputeTaskCompletesNotify(uint32_t nodeId, uint32_t taskId);
 
     static void DagWqeTaskStartsNotify(uint32_t nodeId, uint32_t jettyNum, uint32_t taskId);
 

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "ub-traffic-gen.h"
+#include "ns3/ub-mtp-compat.h"
 
+#include "ns3/ub-transaction-rules.h"
 #include "ub-app.h"
 #include "ub-utils.h"
 
@@ -13,11 +15,15 @@
 #include "ns3/uinteger.h"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <tuple>
 #include <utility>
+#include <optional>
+#include <string_view>
 
 #ifdef NS3_MPI
 #include "ns3/mpi-interface.h"
@@ -108,25 +114,31 @@ UbTrafficGen::IsMultiProcessRuntimeUnsupported()
     return false;
 }
 
+Time
+UbTrafficGen::SelectTaskCleanupDeliveryDelay(bool partitioned, Time causalDeliveryDelay)
+{
+    return partitioned ? causalDeliveryDelay : TimeStep(0);
+}
+
 void UbTrafficGen::AddTask(const TrafficRecord& record)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     AddTaskLocked(record, false);
 }
 
-void
+bool
 UbTrafficGen::AddTaskDuringInitialLoad(const TrafficRecord& record)
 {
-    AddTaskLocked(record, true);
+    return AddTaskLocked(record, true);
 }
 
-void
+bool
 UbTrafficGen::AddTaskDuringInitialLoad(const TrafficRecordView& record)
 {
-    AddTaskLocked(record, true);
+    return AddTaskLocked(record, true);
 }
 
-void
+bool
 UbTrafficGen::AddTaskLocked(const TrafficRecord& record, bool phaseAlreadyIndexed)
 {
     uint32_t taskId = record.taskId;
@@ -134,7 +146,7 @@ UbTrafficGen::AddTaskLocked(const TrafficRecord& record, bool phaseAlreadyIndexe
     if (!SetTaskLocked(task))
     {
         NS_LOG_ERROR("TaskId " << taskId << " already exists, cannot add duplicate task!");
-        return;
+        return false;
     }
     if (!phaseAlreadyIndexed) {
         RegisterTaskPhaseLocked(record.phaseId, taskId);
@@ -175,9 +187,10 @@ UbTrafficGen::AddTaskLocked(const TrafficRecord& record, bool phaseAlreadyIndexe
 
     NS_LOG_DEBUG("Added task " << taskId << " with " << uniqueDependencyPhaseCount
                                << " phase dependencies");
+    return true;
 }
 
-void
+bool
 UbTrafficGen::AddTaskLocked(const TrafficRecordView& record, bool phaseAlreadyIndexed)
 {
     const uint32_t taskId = record.taskId;
@@ -185,7 +198,7 @@ UbTrafficGen::AddTaskLocked(const TrafficRecordView& record, bool phaseAlreadyIn
     if (!SetTaskLocked(task))
     {
         NS_LOG_ERROR("TaskId " << taskId << " already exists, cannot add duplicate task!");
-        return;
+        return false;
     }
     if (!phaseAlreadyIndexed) {
         RegisterTaskPhaseLocked(record.phaseId, taskId);
@@ -244,6 +257,36 @@ UbTrafficGen::AddTaskLocked(const TrafficRecordView& record, bool phaseAlreadyIn
 
     NS_LOG_DEBUG("Added task " << taskId << " with " << uniqueDependencyPhaseCount
                                << " phase dependencies");
+    return true;
+}
+
+void
+UbTrafficGen::RegisterPlannedTpConnections(
+    uint32_t taskId,
+    const std::vector<UbLifecycleResourceIdentity>& connections)
+{
+    if (connections.empty())
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    NS_ABORT_MSG_IF(FindTaskLocked(taskId) == nullptr,
+                    "Cannot register planned TP connections for an unknown task " << taskId);
+    const auto [task, inserted] = m_taskPlannedTpConnections.emplace(taskId, connections);
+    NS_ABORT_MSG_IF(!inserted,
+                    "Planned TP connections already registered for task " << taskId);
+    for (const auto& identity : task->second)
+    {
+        NS_ABORT_MSG_IF(identity.kind != UbLifecycleResourceKind::RTP_CONNECTION,
+                        "Planned TP policy accepts only connection identities");
+        const PlannedTpConnectionKey key{identity.ownerNodeId,
+                                         identity.localId,
+                                         identity.generation};
+        auto [use, created] = m_plannedTpUses.emplace(key, PlannedTpUseRecord{identity, 0});
+        NS_ABORT_MSG_IF(!created && use->second.identity != identity,
+                        "Planned TP identity key collision");
+        ++use->second.remainingUses;
+    }
 }
 
 void
@@ -312,11 +355,11 @@ UbTrafficGen::ConvertToRuntimeTask(const TrafficRecord& record)
     task.phaseId = static_cast<uint32_t>(record.phaseId);
     task.priority = static_cast<uint8_t>(record.priority);
     task.delay = ParseDelayLocked(record.delay);
-    task.op = ParseOpLocked(record.opType);
-    task.srcEntityId = record.srcEntityId;
-    task.dstEntityId = record.dstEntityId;
-    task.hasSrcEntityId = record.hasSrcEntityId;
-    task.hasDstEntityId = record.hasDstEntityId;
+    ParseTaskOperation(task, record.opType, record.atomicSubOperation, record.requestPayloadBytes);
+    task.srcPortId = record.srcPortId;
+    task.dstPortId = record.dstPortId;
+    task.hasSrcPortId = record.hasSrcPortId;
+    task.hasDstPortId = record.hasDstPortId;
     task.hasPhaseDependencies = !record.dependOnPhases.empty();
 
     return task;
@@ -337,14 +380,121 @@ UbTrafficGen::ConvertToRuntimeTask(const TrafficRecordView& record)
     task.phaseId = record.phaseId;
     task.priority = record.priority;
     task.delay = ParseDelayLocked(record.delay);
-    task.op = ParseOpLocked(record.opType);
-    task.srcEntityId = record.srcEntityId;
-    task.dstEntityId = record.dstEntityId;
-    task.hasSrcEntityId = record.hasSrcEntityId;
-    task.hasDstEntityId = record.hasDstEntityId;
+    ParseTaskOperation(task, record.opType, record.atomicSubOperation, record.requestPayloadBytes);
+    task.srcPortId = record.srcPortId;
+    task.dstPortId = record.dstPortId;
+    task.hasSrcPortId = record.hasSrcPortId;
+    task.hasDstPortId = record.hasDstPortId;
     task.hasPhaseDependencies = !record.dependOnPhases.empty();
 
     return task;
+}
+
+bool
+UbTrafficGen::IsAtomicTask(RuntimeTaskOp op)
+{
+    return op >= RuntimeTaskOp::URMA_ATOMIC_COMPARE_SWAP &&
+           op <= RuntimeTaskOp::URMA_ATOMIC_FETCH_XOR;
+}
+
+bool
+UbTrafficGen::IsUrmaTask(RuntimeTaskOp op)
+{
+    return op == RuntimeTaskOp::URMA_WRITE || op == RuntimeTaskOp::URMA_READ ||
+           IsAtomicTask(op) || op >= RuntimeTaskOp::URMA_SEND;
+}
+
+UbTransactionOpcode
+UbTrafficGen::GetUrmaTaskOpcode(RuntimeTaskOp op)
+{
+    if (IsAtomicTask(op))
+    {
+        return static_cast<UbTransactionOpcode>(static_cast<uint8_t>(UbTransactionOpcode::ATOMIC_COMPARE_SWAP) +
+                                     static_cast<uint8_t>(op) -
+                                     static_cast<uint8_t>(RuntimeTaskOp::URMA_ATOMIC_COMPARE_SWAP));
+    }
+    switch (op)
+    {
+    case RuntimeTaskOp::URMA_WRITE: return UbTransactionOpcode::WRITE;
+    case RuntimeTaskOp::URMA_READ: return UbTransactionOpcode::READ;
+    case RuntimeTaskOp::URMA_SEND: return UbTransactionOpcode::SEND;
+    case RuntimeTaskOp::URMA_SEND_WITH_IMMEDIATE: return UbTransactionOpcode::SEND_WITH_IMMEDIATE;
+    case RuntimeTaskOp::URMA_WRITE_WITH_IMMEDIATE: return UbTransactionOpcode::WRITE_WITH_IMMEDIATE;
+    case RuntimeTaskOp::URMA_WRITE_WITH_NOTIFY: return UbTransactionOpcode::WRITE_WITH_NOTIFY;
+    case RuntimeTaskOp::URMA_PREFETCH_TGT: return UbTransactionOpcode::PREFETCH_TGT;
+    case RuntimeTaskOp::URMA_WRITEBACK: return UbTransactionOpcode::WRITEBACK;
+    case RuntimeTaskOp::URMA_MANAGEMENT: return UbTransactionOpcode::MANAGEMENT;
+    case RuntimeTaskOp::URMA_WRITE_WITH_ATOMIC_STORE_ADD: return UbTransactionOpcode::WRITE_WITH_ATOMIC_STORE_ADD;
+    case RuntimeTaskOp::URMA_WRITE_WITH_REMOTE_SYNC: return UbTransactionOpcode::WRITE_WITH_REMOTE_SYNC;
+    case RuntimeTaskOp::URMA_WRITE_WITH_REMOTE_SYNC_WITH_BE: return UbTransactionOpcode::WRITE_WITH_REMOTE_SYNC_WITH_BE;
+    case RuntimeTaskOp::URMA_ATOMIC_STORE_WITH_RETURN_STATUS: return UbTransactionOpcode::ATOMIC_STORE_WITH_RETURN_STATUS;
+    case RuntimeTaskOp::URMA_ATOMIC_SYNC: return UbTransactionOpcode::ATOMIC_SYNC;
+    case RuntimeTaskOp::URMA_WRITE_WITH_BE: return UbTransactionOpcode::WRITE_WITH_BE;
+    case RuntimeTaskOp::URMA_WRITEBACK_WITH_BE: return UbTransactionOpcode::WRITEBACK_WITH_BE;
+    default: break;
+    }
+    NS_ABORT_MSG("Runtime task is not an URMA operation");
+    return UbTransactionOpcode::MAX_OPCODE;
+}
+
+void
+UbTrafficGen::ParseTaskOperation(RuntimeTask& task,
+                                 std::string_view opType,
+                                 std::string_view subOperation,
+                                 std::string_view requestPayloadBytes)
+{
+    task.op = ParseOpLocked(opType);
+    task.atomicOptions.reset();
+    NS_ABORT_MSG_IF(task.op == RuntimeTaskOp::UNKNOWN,
+                    "traffic.csv taskId=" << task.taskId << " opType: unknown value " << opType);
+    if (!IsAtomicTask(task.op))
+    {
+        NS_ABORT_MSG_IF(
+            !subOperation.empty() || !requestPayloadBytes.empty(),
+            "traffic.csv taskId="
+                << task.taskId
+                << " atomicSubOperation/requestPayloadBytes: forbidden on non-atomic tasks");
+        return;
+    }
+    UbAtomicOptions options;
+    if (!subOperation.empty())
+    {
+        static constexpr std::array<std::string_view, 8> names =
+            {"ADD", "CLR", "EOR", "SET", "SMAX", "SMIN", "UMAX", "UMIN"};
+        const auto found = std::find(names.begin(), names.end(), subOperation);
+        NS_ABORT_MSG_IF(found == names.end(),
+                        "traffic.csv taskId="
+                            << task.taskId
+                            << " atomicSubOperation: expected ADD/CLR/EOR/SET/SMAX/SMIN/UMAX/UMIN");
+        options.subOperation =
+            static_cast<UbAtomicSubOperation>(std::distance(names.begin(), found));
+    }
+    if (!requestPayloadBytes.empty())
+    {
+        uint32_t payload = 0;
+        const auto parsed = std::from_chars(requestPayloadBytes.data(),
+                                            requestPayloadBytes.data() + requestPayloadBytes.size(),
+                                            payload);
+        NS_ABORT_MSG_IF(parsed.ec != std::errc{} ||
+                            parsed.ptr != requestPayloadBytes.data() + requestPayloadBytes.size(),
+                        "traffic.csv taskId=" << task.taskId
+                                              << " requestPayloadBytes: expected uint32 decimal");
+        options.requestPayloadBytes = payload;
+    }
+    // Reuse the single transaction validation entry so CSV input obeys exactly the constraints a
+    // local WQE submission will enforce later.
+    UbTransactionRequestInput request;
+    request.opcode = GetUrmaTaskOpcode(task.op);
+    request.logicalBytes = task.dataSize;
+    request.payloadBytes = options.requestPayloadBytes.value_or(task.dataSize);
+    request.fields.memoryAccess = UbMemoryAccessFields{0, 0, task.dataSize};
+    request.atomicOptions = options;
+    request.maxPayloadBytes = UB_MTU_BYTE;
+    request.origin = UbTransactionRequestOrigin::LOCAL_SUBMISSION;
+    const auto validation = ValidateTransactionRequest(request);
+    NS_ABORT_MSG_IF(!validation.IsValid(),
+                    "traffic.csv taskId=" << task.taskId << ": " << validation.message);
+    task.atomicOptions = options;
 }
 
 UbTrafficGen::RuntimeTaskOp
@@ -359,6 +509,15 @@ UbTrafficGen::ParseOpLocked(std::string_view opType)
     if (opType == "URMA_WRITE") {
         return RuntimeTaskOp::URMA_WRITE;
     }
+    static constexpr std::pair<std::string_view, RuntimeTaskOp> extra[] = {
+        {"URMA_SEND", RuntimeTaskOp::URMA_SEND}, {"URMA_SEND_WITH_IMMEDIATE", RuntimeTaskOp::URMA_SEND_WITH_IMMEDIATE},
+        {"URMA_WRITE_WITH_IMMEDIATE", RuntimeTaskOp::URMA_WRITE_WITH_IMMEDIATE}, {"URMA_WRITE_WITH_NOTIFY", RuntimeTaskOp::URMA_WRITE_WITH_NOTIFY},
+        {"URMA_PREFETCH_TGT", RuntimeTaskOp::URMA_PREFETCH_TGT}, {"URMA_WRITEBACK", RuntimeTaskOp::URMA_WRITEBACK},
+        {"URMA_MANAGEMENT", RuntimeTaskOp::URMA_MANAGEMENT}, {"URMA_WRITE_WITH_ATOMIC_STORE_ADD", RuntimeTaskOp::URMA_WRITE_WITH_ATOMIC_STORE_ADD},
+        {"URMA_WRITE_WITH_REMOTE_SYNC", RuntimeTaskOp::URMA_WRITE_WITH_REMOTE_SYNC}, {"URMA_WRITE_WITH_REMOTE_SYNC_WITH_BE", RuntimeTaskOp::URMA_WRITE_WITH_REMOTE_SYNC_WITH_BE},
+        {"URMA_ATOMIC_STORE_WITH_RETURN_STATUS", RuntimeTaskOp::URMA_ATOMIC_STORE_WITH_RETURN_STATUS}, {"URMA_ATOMIC_SYNC", RuntimeTaskOp::URMA_ATOMIC_SYNC},
+        {"URMA_WRITE_WITH_BE", RuntimeTaskOp::URMA_WRITE_WITH_BE}, {"URMA_WRITEBACK_WITH_BE", RuntimeTaskOp::URMA_WRITEBACK_WITH_BE}};
+    for (const auto& [name, value] : extra) if (opType == name) return value;
     if (opType == "URMA_READ") {
         return RuntimeTaskOp::URMA_READ;
     }
@@ -367,6 +526,28 @@ UbTrafficGen::ParseOpLocked(std::string_view opType)
     }
     if (opType == "MEM_LOAD") {
         return RuntimeTaskOp::MEM_LOAD;
+    }
+    if (opType == "COMPUTE") {
+        return RuntimeTaskOp::COMPUTE;
+    }
+    if (opType == "LOCAL_READY") {
+        return RuntimeTaskOp::LOCAL_READY;
+    }
+    static constexpr std::array<std::string_view, 9> atomicNames = {"URMA_ATOMIC_COMPARE_SWAP",
+                                                                    "URMA_ATOMIC_SWAP",
+                                                                    "URMA_ATOMIC_STORE",
+                                                                    "URMA_ATOMIC_LOAD",
+                                                                    "URMA_ATOMIC_FETCH_ADD",
+                                                                    "URMA_ATOMIC_FETCH_SUB",
+                                                                    "URMA_ATOMIC_FETCH_AND",
+                                                                    "URMA_ATOMIC_FETCH_OR",
+                                                                    "URMA_ATOMIC_FETCH_XOR"};
+    const auto found = std::find(atomicNames.begin(), atomicNames.end(), opType);
+    if (found != atomicNames.end())
+    {
+        return static_cast<RuntimeTaskOp>(
+            static_cast<uint8_t>(RuntimeTaskOp::URMA_ATOMIC_COMPARE_SWAP) +
+            std::distance(atomicNames.begin(), found));
     }
     return RuntimeTaskOp::UNKNOWN;
 }
@@ -728,6 +909,13 @@ UbTrafficGen::GetTaskCleanupInfoById(uint32_t taskId)
 
 void UbTrafficGen::MarkTaskCompleted(uint32_t taskId)
 {
+    SubmitTaskCompletion(taskId, std::nullopt);
+}
+
+void
+UbTrafficGen::SubmitTaskCompletion(uint32_t taskId,
+                                   std::optional<TaskCleanupRequest> cleanupRequest)
+{
     Time completionVisibleTs;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -735,6 +923,26 @@ void UbTrafficGen::MarkTaskCompleted(uint32_t taskId)
         TaskState* state = FindTaskStateLocked(taskId);
         if (state == nullptr || *state != TaskState::RUNNING) {
             return;
+        }
+
+        if (cleanupRequest.has_value())
+        {
+            const auto [cleanupIt, inserted] =
+                m_pendingTaskCleanups.emplace(taskId, *cleanupRequest);
+            NS_ABORT_MSG_IF(!inserted &&
+                                (cleanupIt->second.ownerNodeId != cleanupRequest->ownerNodeId ||
+                                 cleanupIt->second.ownerApplicationIndex !=
+                                     cleanupRequest->ownerApplicationIndex ||
+                                 cleanupIt->second.jettyNum != cleanupRequest->jettyNum ||
+                                 cleanupIt->second.destroyTaskScopedJetty !=
+                                     cleanupRequest->destroyTaskScopedJetty ||
+                                 cleanupIt->second.destroyPlannedTpConnections !=
+                                     cleanupRequest->destroyPlannedTpConnections),
+                            "Conflicting task cleanup request for task " << taskId);
+            if (!inserted)
+            {
+                return;
+            }
         }
 
         const Time delay = ResolveCompletionVisibleDelayLocked();
@@ -768,26 +976,8 @@ UbTrafficGen::ValidateDependencyVisibilityDelay(bool requireStrictlyPositive) co
         return;
     }
 
-    NS_ABORT_MSG_IF(!m_dependencyVisibilityDelay.has_value() &&
-                        !m_automaticDependencyVisibilityDelay.has_value(),
-                    "traffic.csv contains task dependencies but no dependency visibility delay is "
-                    "available. Configure a positive UB link delay or pass "
-                    "--dependency-visibility-delay=<Time>.");
-    NS_ABORT_MSG_IF(requireStrictlyPositive && !ResolveCompletionVisibleDelayLocked().IsStrictlyPositive(),
+    NS_ABORT_MSG_IF(requireStrictlyPositive && !m_dependencyVisibilityDelay.IsStrictlyPositive(),
                     "parallel traffic.csv dependencies require a positive dependency visibility delay.");
-}
-
-void
-UbTrafficGen::ConsiderAutomaticDependencyVisibilityDelay(Time delay)
-{
-    NS_ABORT_MSG_IF(delay.IsStrictlyNegative(),
-                    "automatic dependency visibility delay must be non-negative");
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_automaticDependencyVisibilityDelay.has_value() ||
-        delay < *m_automaticDependencyVisibilityDelay)
-    {
-        m_automaticDependencyVisibilityDelay = delay;
-    }
 }
 
 void
@@ -890,6 +1080,8 @@ void
 UbTrafficGen::ApplyTaskCompletion(uint32_t taskId)
 {
     ReadyTaskBatch readyBatch;
+    std::optional<TaskCleanupRequest> cleanupRequest;
+    bool releasePlannedTpBinding = false;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -942,13 +1134,98 @@ UbTrafficGen::ApplyTaskCompletion(uint32_t taskId)
         }
 
         readyBatch = CollectReadyTaskBatchLocked();
+        const auto cleanupIt = m_pendingTaskCleanups.find(taskId);
+        if (cleanupIt != m_pendingTaskCleanups.end())
+        {
+            cleanupRequest = cleanupIt->second;
+            m_pendingTaskCleanups.erase(cleanupIt);
+        }
+
+        if (!m_taskPlannedTpConnections.empty())
+        {
+            const auto plannedTask = m_taskPlannedTpConnections.find(taskId);
+            if (plannedTask != m_taskPlannedTpConnections.end())
+            {
+                releasePlannedTpBinding = cleanupRequest.has_value() &&
+                                          cleanupRequest->destroyPlannedTpConnections;
+                for (const auto& identity : plannedTask->second)
+                {
+                    const PlannedTpConnectionKey key{identity.ownerNodeId,
+                                                     identity.localId,
+                                                     identity.generation};
+                    auto use = m_plannedTpUses.find(key);
+                    NS_ABORT_MSG_IF(use == m_plannedTpUses.end() ||
+                                        use->second.remainingUses == 0,
+                                    "Planned TP reference balance is corrupt for task " << taskId);
+                    --use->second.remainingUses;
+                    if (use->second.remainingUses == 0)
+                    {
+                        if (cleanupRequest.has_value() &&
+                            cleanupRequest->destroyPlannedTpConnections)
+                        {
+                            cleanupRequest->plannedTpConnections.push_back(identity);
+                        }
+                        m_plannedTpUses.erase(use);
+                    }
+                }
+                m_taskPlannedTpConnections.erase(plannedTask);
+            }
+        }
     }
 
     ScheduleTasks(readyBatch);
 
+    if (cleanupRequest.has_value())
+    {
+        Time deliveryDelay = TimeStep(0);
+#ifdef NS3_MTP
+        if (MtpInterface::isPartitioned())
+        {
+            deliveryDelay = SelectTaskCleanupDeliveryDelay(
+                true,
+                UbGetCausalDeliveryDelay(cleanupRequest->ownerNodeId));
+        }
+#endif
+        const auto cleanup = *cleanupRequest;
+        Simulator::ScheduleWithContext(cleanup.ownerNodeId,
+                                       deliveryDelay,
+                                       [cleanup, taskId, releasePlannedTpBinding]() {
+                                           UbTrafficGen::ApplyTaskCleanupOnOwner(
+                                               cleanup.ownerNodeId,
+                                               cleanup.ownerApplicationIndex,
+                                               taskId,
+                                               cleanup.jettyNum,
+                                               cleanup.destroyTaskScopedJetty,
+                                               releasePlannedTpBinding,
+                                               cleanup.plannedTpConnections);
+                                       });
+    }
+
     if (IsCompleted()) {
         NS_LOG_DEBUG("[APPLICATION INFO] All tasks completed");
     }
+}
+
+void
+UbTrafficGen::ApplyTaskCleanupOnOwner(uint32_t ownerNodeId,
+                                      uint32_t ownerApplicationIndex,
+                                      uint32_t taskId,
+                                      uint32_t jettyNum,
+                                      bool destroyTaskScopedJetty,
+                                      bool releasePlannedTpBinding,
+                                      std::vector<UbLifecycleResourceIdentity> plannedTpConnections)
+{
+    Ptr<Node> ownerNode = NodeList::GetNode(ownerNodeId);
+    NS_ABORT_MSG_IF(ownerNode == nullptr || ownerApplicationIndex >= ownerNode->GetNApplications(),
+                    "Task cleanup owner is unavailable for task " << taskId);
+    Ptr<UbApp> cleanupOwner = DynamicCast<UbApp>(ownerNode->GetApplication(ownerApplicationIndex));
+    NS_ABORT_MSG_IF(cleanupOwner == nullptr,
+                    "Task cleanup owner application is not UbApp for task " << taskId);
+    cleanupOwner->CleanupCompletedTask(taskId,
+                                       jettyNum,
+                                       destroyTaskScopedJetty,
+                                       releasePlannedTpBinding,
+                                       plannedTpConnections);
 }
 
 bool UbTrafficGen::IsCompleted() const
@@ -998,7 +1275,7 @@ uint32_t UbTrafficGen::GetCompletedTaskCount() const
 }
 
 uint64_t
-UbTrafficGen::GetDependencyReferenceCountForTesting() const
+UbTrafficGen::GetDependencyReferenceCount() const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     uint64_t referenceCount = 0;
@@ -1023,7 +1300,7 @@ UbTrafficGen::IsUsingDenseTaskStoreForTesting() const
 }
 
 uint32_t
-UbTrafficGen::GetStoredTaskCountForTesting() const
+UbTrafficGen::GetStoredTaskCount() const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_useDenseTaskStore) {
@@ -1093,7 +1370,13 @@ UbTrafficGen::CollectReadyTaskBatchLocked()
                     continue;
                 }
 
-                *state = TaskState::RUNNING;
+                // COMPUTE acquires its UBPU only when its scheduled start event fires. Keep it
+                // READY during a non-zero task delay so resource ownership starts at execution,
+                // while communication retains the existing scheduled RUNNING transition.
+                if (task->op != RuntimeTaskOp::COMPUTE)
+                {
+                    *state = TaskState::RUNNING;
+                }
                 batch.tasks.push_back(*task);
                 batch.sourceApps.push_back(GetSourceAppLocked(task->sourceNode));
             }
@@ -1132,14 +1415,7 @@ UbTrafficGen::HasDependenciesLocked() const
 Time
 UbTrafficGen::ResolveCompletionVisibleDelayLocked() const
 {
-    if (m_dependencyVisibilityDelay.has_value()) {
-        return *m_dependencyVisibilityDelay;
-    }
-    if (m_automaticDependencyVisibilityDelay.has_value())
-    {
-        return *m_automaticDependencyVisibilityDelay;
-    }
-    return Time(0);
+    return m_dependencyVisibilityDelay;
 }
 
 uint64_t
@@ -1270,13 +1546,170 @@ void UbTrafficGen::ScheduleTasks(const ReadyTaskBatch& batch)
 void
 UbTrafficGen::StartTask(Ptr<UbApp> app, RuntimeTask task)
 {
+    if (task.op == RuntimeTaskOp::LOCAL_READY)
+    {
+        RecordCanonicalEvent("START", task);
+        MarkTaskCompleted(task.taskId);
+        return;
+    }
+    if (task.op == RuntimeTaskOp::COMPUTE)
+    {
+        SubmitComputeTask(app, task);
+        return;
+    }
+
+    RecordCanonicalEvent("START", task);
+    app->SendTraffic(task);
+}
+
+void
+UbTrafficGen::SubmitComputeTask(Ptr<UbApp> app, RuntimeTask task)
+{
+    NS_ABORT_MSG_IF(app == nullptr, "COMPUTE task requires a source application");
+
+    bool queued = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        TaskState* state = FindTaskStateLocked(task.taskId);
+        NS_ABORT_MSG_IF(state == nullptr || *state != TaskState::READY,
+                        "COMPUTE task must be READY before it can acquire or queue: "
+                            << task.taskId);
+        const auto running = m_computeRunningTasks.find(task.sourceNode);
+        if (running == m_computeRunningTasks.end())
+        {
+            m_computeRunningTasks.emplace(task.sourceNode, task.taskId);
+            m_computeRunningApps.emplace(task.sourceNode, app);
+            *state = TaskState::RUNNING;
+        }
+        else
+        {
+            m_computeQueues[task.sourceNode].push_back(ComputeTaskRequest{app, task});
+            *state = TaskState::QUEUED;
+            queued = true;
+        }
+    }
+
+    if (queued)
+    {
+        app->ComputeTaskQueuedNotify(task.sourceNode, task.taskId);
+        NS_LOG_DEBUG("Queued COMPUTE task " << task.taskId << " on UBPU " << task.sourceNode);
+        return;
+    }
+
+    app->ComputeTaskStartsNotify(task.sourceNode, task.taskId);
     RecordCanonicalEvent("START", task);
     app->SendTraffic(task);
 }
 
 void UbTrafficGen::OnTaskCompleted(uint32_t taskId)
 {
+    bool isCompute = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const RuntimeTask* task = FindTaskLocked(taskId);
+        isCompute = task != nullptr && task->op == RuntimeTaskOp::COMPUTE;
+    }
+    if (isCompute)
+    {
+        OnComputeTaskCompleted(taskId);
+        return;
+    }
     MarkTaskCompleted(taskId);
+}
+
+void
+UbTrafficGen::OnComputeTaskCompleted(uint32_t taskId)
+{
+    RuntimeTask completedTask;
+    Ptr<UbApp> completedApp;
+    std::optional<ComputeTaskRequest> nextTask;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const RuntimeTask* task = FindTaskLocked(taskId);
+        if (task == nullptr || task->op != RuntimeTaskOp::COMPUTE)
+        {
+            return;
+        }
+
+        const auto running = m_computeRunningTasks.find(task->sourceNode);
+        if (running == m_computeRunningTasks.end() || running->second != taskId)
+        {
+            return;
+        }
+
+        completedTask = *task;
+        const auto appIt = m_computeRunningApps.find(task->sourceNode);
+        if (appIt != m_computeRunningApps.end())
+        {
+            completedApp = appIt->second;
+            m_computeRunningApps.erase(appIt);
+        }
+        m_computeRunningTasks.erase(running);
+
+        auto queueIt = m_computeQueues.find(task->sourceNode);
+        if (queueIt != m_computeQueues.end() && !queueIt->second.empty())
+        {
+            nextTask = std::move(queueIt->second.front());
+            queueIt->second.pop_front();
+            TaskState* nextState = FindTaskStateLocked(nextTask->task.taskId);
+            NS_ABORT_MSG_IF(nextState == nullptr || *nextState != TaskState::QUEUED,
+                            "COMPUTE queue state is not QUEUED for task "
+                                << nextTask->task.taskId);
+            *nextState = TaskState::RUNNING;
+            m_computeRunningTasks.emplace(task->sourceNode, nextTask->task.taskId);
+            m_computeRunningApps.emplace(task->sourceNode, nextTask->app);
+            if (queueIt->second.empty())
+            {
+                m_computeQueues.erase(queueIt);
+            }
+        }
+    }
+
+    if (completedApp != nullptr)
+    {
+        completedApp->ComputeTaskCompletesNotify(completedTask.sourceNode, completedTask.taskId);
+    }
+
+    if (nextTask.has_value())
+    {
+        nextTask->app->ComputeTaskStartsNotify(nextTask->task.sourceNode,
+                                               nextTask->task.taskId);
+        RecordCanonicalEvent("START", nextTask->task);
+        nextTask->app->SendTraffic(nextTask->task);
+    }
+
+    // Release the local compute slot before entering the existing visibility path.
+    MarkTaskCompleted(taskId);
+}
+
+void
+UbTrafficGen::OnTaskCompleted(uint32_t taskId,
+                              Ptr<UbApp> cleanupOwner,
+                              uint32_t jettyNum,
+                              bool destroyTaskScopedJetty,
+                              bool destroyPlannedTpConnections)
+{
+    NS_ABORT_MSG_IF(cleanupOwner == nullptr, "Task cleanup owner must not be null");
+    Ptr<Node> ownerNode = cleanupOwner->GetNode();
+    NS_ABORT_MSG_IF(ownerNode == nullptr, "Task cleanup owner must belong to a node");
+    uint32_t applicationIndex = ownerNode->GetNApplications();
+    for (uint32_t index = 0; index < ownerNode->GetNApplications(); ++index)
+    {
+        if (PeekPointer(ownerNode->GetApplication(index)) == PeekPointer(cleanupOwner))
+        {
+            applicationIndex = index;
+            break;
+        }
+    }
+    NS_ABORT_MSG_IF(applicationIndex == ownerNode->GetNApplications(),
+                    "Task cleanup owner must be installed on its node");
+    SubmitTaskCompletion(taskId,
+                         TaskCleanupRequest{ownerNode->GetId(),
+                                            applicationIndex,
+                                            jettyNum,
+                                            destroyTaskScopedJetty,
+                                            destroyPlannedTpConnections,
+                                            {}});
 }
 
 void

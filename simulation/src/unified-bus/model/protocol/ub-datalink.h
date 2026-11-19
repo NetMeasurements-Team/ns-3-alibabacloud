@@ -19,11 +19,46 @@ public:
     UbDataLink();
     virtual ~UbDataLink();
 
-    static UbDatalinkControlCreditHeader ParseCreditHeader(Ptr<Packet> p, Ptr<UbPort> port);
-    static UbDatalinkPacketHeader ParsePacketHeader(Ptr<Packet> p);
-    static Ptr<Packet> GenControlCreditPacket(const uint8_t credits[16]);
-    static void GenPacketHeader(Ptr<Packet> p, bool credit, bool ack, uint8_t vlIndex, uint8_t vl, bool mode,
-                                bool policy, UbDatalinkHeaderConfig config);
+    static UbDatalinkControlCreditHeader ConsumeCreditHeaderAndRestoreCredits(Ptr<Packet> packet,
+                                                                              Ptr<UbPort> port);
+    static UbDatalinkPacketHeader RemovePacketHeader(Ptr<Packet> packet);
+    static Ptr<Packet> BuildControlCreditPacket(const uint8_t credits[16]);
+    static void AddPacketHeader(Ptr<Packet> packet,
+                                bool credit,
+                                bool ack,
+                                uint8_t creditTargetVl,
+                                uint8_t packetVl,
+                                RoutingType routingType,
+                                UbDatalinkHeaderConfig config);
+
+    [[deprecated("use ConsumeCreditHeaderAndRestoreCredits")]] static UbDatalinkControlCreditHeader
+    ParseCreditHeader(Ptr<Packet> packet, Ptr<UbPort> port)
+    {
+        return ConsumeCreditHeaderAndRestoreCredits(packet, port);
+    }
+
+    [[deprecated("use RemovePacketHeader")]] static UbDatalinkPacketHeader ParsePacketHeader(
+        Ptr<Packet> packet)
+    {
+        return RemovePacketHeader(packet);
+    }
+
+    [[deprecated("use BuildControlCreditPacket")]] static Ptr<Packet> GenControlCreditPacket(
+        const uint8_t credits[16])
+    {
+        return BuildControlCreditPacket(credits);
+    }
+
+    [[deprecated("use AddPacketHeader")]] static void GenPacketHeader(Ptr<Packet> packet,
+                                                                      bool credit,
+                                                                      bool ack,
+                                                                      uint8_t creditTargetVl,
+                                                                      uint8_t packetVl,
+                                                                      RoutingType routingType,
+                                                                      UbDatalinkHeaderConfig config)
+    {
+        AddPacketHeader(packet, credit, ack, creditTargetVl, packetVl, routingType, config);
+    }
 };
 
 } // namespace ns3

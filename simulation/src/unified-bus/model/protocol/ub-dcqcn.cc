@@ -135,6 +135,128 @@ UbHostDcqcn::OnTpAttached(Ptr<UbTransportChannel> tp)
     m_currentRate = m_initialRate;
     m_targetRate = m_initialRate;
     m_nextAvailableSendTime = Simulator::Now();
+    InitTrackedEvents();
+}
+
+void
+UbHostDcqcn::InitTrackedEvents()
+{
+    if (m_trackedEventsInitialized || m_tp == nullptr)
+    {
+        return;
+    }
+    Ptr<UbLifecycleCoordinator> coordinator =
+        UbLifecycleCoordinator::GetOrCreate(NodeList::GetNode(m_hostNodeId));
+    m_pendingCnpTrackedEvents.Init(coordinator);
+    m_rateIncreaseTrackedEvents.Init(coordinator);
+    m_alphaTrackedEvents.Init(coordinator);
+    m_pacingTrackedEvents.Init(coordinator);
+    m_trackedEventsInitialized = true;
+}
+
+EventId
+UbHostDcqcn::SchedulePendingCnp(Time delay)
+{
+    const auto& owner = m_tp->GetLifecycleOwner();
+    const uint64_t token = m_pendingCnpTrackedEvents.Track(owner);
+    EventId event = Simulator::Schedule(delay, &UbHostDcqcn::HandleTrackedPendingCnp, this, token);
+    m_pendingCnpTrackedEvents.Attach(owner, token, event, {});
+    return event;
+}
+
+EventId
+UbHostDcqcn::ScheduleRateIncrease()
+{
+    const auto& owner = m_tp->GetLifecycleOwner();
+    const uint64_t token = m_rateIncreaseTrackedEvents.Track(owner);
+    EventId event = Simulator::Schedule(m_rateIncreaseTimer,
+                                        &UbHostDcqcn::HandleTrackedRateIncrease,
+                                        this,
+                                        token);
+    m_rateIncreaseTrackedEvents.Attach(owner, token, event, {});
+    return event;
+}
+
+EventId
+UbHostDcqcn::ScheduleAlphaUpdate()
+{
+    const auto& owner = m_tp->GetLifecycleOwner();
+    const uint64_t token = m_alphaTrackedEvents.Track(owner);
+    EventId event = Simulator::Schedule(m_alphaUpdateInterval,
+                                        &UbHostDcqcn::HandleTrackedAlphaUpdate,
+                                        this,
+                                        token);
+    m_alphaTrackedEvents.Attach(owner, token, event, {});
+    return event;
+}
+
+EventId
+UbHostDcqcn::SchedulePacing(Time delay)
+{
+    const auto& owner = m_tp->GetLifecycleOwner();
+    const uint64_t token = m_pacingTrackedEvents.Track(owner);
+    EventId event =
+        Simulator::Schedule(delay, &UbHostDcqcn::HandleTrackedPacingWakeup, this, token);
+    m_pacingTrackedEvents.Attach(owner, token, event, {});
+    return event;
+}
+
+void
+UbHostDcqcn::CancelTrackedEvent(EventId& event, UbTrackedEventSet& trackedEvents)
+{
+    event.Cancel();
+    if (m_trackedEventsInitialized && m_tp != nullptr)
+    {
+        trackedEvents.CancelPending(m_tp->GetLifecycleOwner());
+    }
+}
+
+void
+UbHostDcqcn::HandleTrackedPendingCnp(uint64_t token)
+{
+    const auto& owner = m_tp->GetLifecycleOwner();
+    if (!m_pendingCnpTrackedEvents.Begin(owner, token))
+    {
+        return;
+    }
+    EmitPendingCnp();
+    m_pendingCnpTrackedEvents.Resolve(owner, token);
+}
+
+void
+UbHostDcqcn::HandleTrackedRateIncrease(uint64_t token)
+{
+    const auto& owner = m_tp->GetLifecycleOwner();
+    if (!m_rateIncreaseTrackedEvents.Begin(owner, token))
+    {
+        return;
+    }
+    HandleRateIncreaseTimer();
+    m_rateIncreaseTrackedEvents.Resolve(owner, token);
+}
+
+void
+UbHostDcqcn::HandleTrackedAlphaUpdate(uint64_t token)
+{
+    const auto& owner = m_tp->GetLifecycleOwner();
+    if (!m_alphaTrackedEvents.Begin(owner, token))
+    {
+        return;
+    }
+    HandleAlphaTimer();
+    m_alphaTrackedEvents.Resolve(owner, token);
+}
+
+void
+UbHostDcqcn::HandleTrackedPacingWakeup(uint64_t token)
+{
+    const auto& owner = m_tp->GetLifecycleOwner();
+    if (!m_pacingTrackedEvents.Begin(owner, token))
+    {
+        return;
+    }
+    HandlePacingWakeup();
+    m_pacingTrackedEvents.Resolve(owner, token);
 }
 
 bool
@@ -161,10 +283,10 @@ UbHostDcqcn::IsCcLimited(uint32_t bytes)
 void
 UbHostDcqcn::DoDispose()
 {
-    m_pendingCnpEvent.Cancel();
-    m_rateIncreaseEvent.Cancel();
-    m_alphaEvent.Cancel();
-    m_pacingWakeupEvent.Cancel();
+    CancelTrackedEvent(m_pendingCnpEvent, m_pendingCnpTrackedEvents);
+    CancelTrackedEvent(m_rateIncreaseEvent, m_rateIncreaseTrackedEvents);
+    CancelTrackedEvent(m_alphaEvent, m_alphaTrackedEvents);
+    CancelTrackedEvent(m_pacingWakeupEvent, m_pacingTrackedEvents);
     ReleaseHostActiveFlow();
 
     m_tp = nullptr;
@@ -284,11 +406,10 @@ UbHostDcqcn::ResetRecoveryState()
     m_timeRecoveryEvents = 0;
     m_byteRecoveryEvents = 0;
     m_bytesSinceLastIncrease = 0;
-    m_rateIncreaseEvent.Cancel();
-    m_alphaEvent.Cancel();
-    m_rateIncreaseEvent =
-        Simulator::Schedule(m_rateIncreaseTimer, &UbHostDcqcn::HandleRateIncreaseTimer, this);
-    m_alphaEvent = Simulator::Schedule(m_alphaUpdateInterval, &UbHostDcqcn::HandleAlphaTimer, this);
+    CancelTrackedEvent(m_rateIncreaseEvent, m_rateIncreaseTrackedEvents);
+    CancelTrackedEvent(m_alphaEvent, m_alphaTrackedEvents);
+    m_rateIncreaseEvent = ScheduleRateIncrease();
+    m_alphaEvent = ScheduleAlphaUpdate();
 }
 
 void
@@ -302,8 +423,7 @@ UbHostDcqcn::HandleRateIncreaseTimer()
     }
 
     ApplyRecoveryIncrease(false);
-    m_rateIncreaseEvent =
-        Simulator::Schedule(m_rateIncreaseTimer, &UbHostDcqcn::HandleRateIncreaseTimer, this);
+    m_rateIncreaseEvent = ScheduleRateIncrease();
 }
 
 void
@@ -329,7 +449,7 @@ UbHostDcqcn::HandleAlphaTimer()
 
     m_alpha = (1.0 - m_g) * m_alpha;
     TraceSenderState("ALPHA_DECAY");
-    m_alphaEvent = Simulator::Schedule(m_alphaUpdateInterval, &UbHostDcqcn::HandleAlphaTimer, this);
+    m_alphaEvent = ScheduleAlphaUpdate();
 }
 
 void
@@ -364,7 +484,7 @@ UbHostDcqcn::SchedulePacingWakeup()
 
     const Time now = Simulator::Now();
     const Time delay = m_nextAvailableSendTime > now ? (m_nextAvailableSendTime - now) : Time(0);
-    m_pacingWakeupEvent = Simulator::Schedule(delay, &UbHostDcqcn::HandlePacingWakeup, this);
+    m_pacingWakeupEvent = SchedulePacing(delay);
 }
 
 void
@@ -387,9 +507,9 @@ UbHostDcqcn::OnSenderTransportIdle()
     }
 
     ReleaseHostActiveFlow();
-    m_rateIncreaseEvent.Cancel();
-    m_alphaEvent.Cancel();
-    m_pacingWakeupEvent.Cancel();
+    CancelTrackedEvent(m_rateIncreaseEvent, m_rateIncreaseTrackedEvents);
+    CancelTrackedEvent(m_alphaEvent, m_alphaTrackedEvents);
+    CancelTrackedEvent(m_pacingWakeupEvent, m_pacingTrackedEvents);
     m_senderStarted = false;
     m_alpha = 1.0;
     m_currentRate = m_initialRate;
@@ -398,6 +518,13 @@ UbHostDcqcn::OnSenderTransportIdle()
     m_byteRecoveryEvents = 0;
     m_bytesSinceLastIncrease = 0;
     m_nextAvailableSendTime = Simulator::Now();
+}
+
+void
+UbHostDcqcn::OnTpDestroyRequested()
+{
+    CancelTrackedEvent(m_pendingCnpEvent, m_pendingCnpTrackedEvents);
+    OnSenderTransportIdle();
 }
 
 void
@@ -430,7 +557,7 @@ UbHostDcqcn::OnReceiverDataPacketReceived(uint64_t psn,
     {
         if (!m_pendingCnpEvent.IsExpired())
         {
-            m_pendingCnpEvent.Cancel();
+            CancelTrackedEvent(m_pendingCnpEvent, m_pendingCnpTrackedEvents);
         }
         EmitPendingCnp();
         return;
@@ -439,7 +566,7 @@ UbHostDcqcn::OnReceiverDataPacketReceived(uint64_t psn,
     if (m_pendingCnpEvent.IsExpired())
     {
         const Time delay = (m_lastCnpSent + m_cnpInterval) - now;
-        m_pendingCnpEvent = Simulator::Schedule(delay, &UbHostDcqcn::EmitPendingCnp, this);
+        m_pendingCnpEvent = SchedulePendingCnp(delay);
     }
 }
 
@@ -539,7 +666,7 @@ UbHostDcqcn::OnSenderCongestionNotification(TpOpcode opcode,
         m_nextAvailableSendTime = now + Seconds(outstandingDebt.GetSeconds() * rescale);
         if (!m_pacingWakeupEvent.IsExpired())
         {
-            m_pacingWakeupEvent.Cancel();
+            CancelTrackedEvent(m_pacingWakeupEvent, m_pacingTrackedEvents);
         }
         SchedulePacingWakeup();
     }
@@ -601,11 +728,7 @@ UbSwitchDcqcn::GetOutPortBacklogBytes(uint32_t outPort) const
 {
     NS_ASSERT_MSG(m_switch != nullptr, "UbSwitchDcqcn must bind to a switch before queue inspection");
 
-    Ptr<Node> node = m_switch->GetObject<Node>();
-    Ptr<UbPort> port = DynamicCast<UbPort>(node->GetDevice(outPort));
-    uint64_t egressUsed = port != nullptr ? port->GetUbQueue()->GetCurrentBytes() : 0;
-    uint64_t voqUsed = m_switch->GetQueueManager()->GetTotalOutPortBufferUsed(outPort);
-    return voqUsed + egressUsed;
+    return m_switch->GetQueueManager()->GetOutPortQueueBacklogBytes(outPort);
 }
 
 void

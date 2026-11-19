@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#include "ns3/log.h"
-#include "ns3/simulator.h"
-#include "ns3/ub-controller.h"
-#include "ns3/ub-transaction.h"
-#include "ns3/ub-caqm.h"
-#include "ns3/ub-dcqcn.h"
-#include "../ub-network-address.h"
-#include "ns3/node.h"
-#include "ns3/ub-switch.h"
-#include "ns3/ub-queue-manager.h"
 #include "ns3/ub-transport.h"
-#include "ns3/ub-utils.h"
+#include "ns3/ub-enum-accessor.h"
+
+#include "../ub-network-address.h"
+#include "ub-ta-codec.h"
+#include "ub-transaction-rules.h"
+
+#include "ns3/log.h"
+#include "ns3/node.h"
+#include "ns3/simulator.h"
+#include "ns3/ub-caqm.h"
+#include "ns3/ub-controller.h"
+#include "ns3/ub-dcqcn.h"
+#include "ns3/ub-lifecycle.h"
 #include "ns3/ub-modulo-sequence.h"
+#include "ns3/ub-queue-manager.h"
+#include "ns3/ub-switch.h"
+#include "ns3/ub-transaction.h"
+#include "ns3/ub-utils.h"
 
 #include <algorithm>
 #include <sstream>
@@ -36,7 +42,7 @@ constexpr uint32_t kShallowPipelineActiveSendDepth = 2;
 bool
 IsZeroPayloadReadRequest(const Ptr<UbWqeSegment>& segment)
 {
-    return segment != nullptr && segment->GetType() == TaOpcode::TA_OPCODE_READ &&
+    return segment != nullptr && segment->GetType() == UbTransactionOpcode::READ &&
            segment->GetSegmentKind() == UbTransactionSegmentKind::REQUEST;
 }
 
@@ -49,13 +55,26 @@ GetProgressBytesThisPacket(const Ptr<UbWqeSegment>& segment)
 uint32_t
 GetPayloadBytesThisPacket(const Ptr<UbWqeSegment>& segment, uint32_t progressBytes)
 {
+    if (segment->GetSegmentKind() == UbTransactionSegmentKind::RESPONSE &&
+        segment->GetPayloadBytes() == 0)
+    {
+        // Zero-payload TA responses retain one byte of carrier progress for scheduling, but the
+        // response packet must not acquire a fake payload byte on the wire.
+        return 0;
+    }
     return IsZeroPayloadReadRequest(segment) ? 0 : progressBytes;
 }
 
 uint32_t
 GetWireLengthBytes(const Ptr<UbWqeSegment>& segment, uint32_t payloadBytes)
 {
-    return IsZeroPayloadReadRequest(segment) ? segment->GetResLenBytes() : payloadBytes;
+    const bool isWriteRequest = segment != nullptr &&
+                                segment->GetType() == UbTransactionOpcode::WRITE &&
+                                segment->GetSegmentKind() == UbTransactionSegmentKind::REQUEST;
+    return IsZeroPayloadReadRequest(segment) || isWriteRequest ||
+                   IsAtomicTransaction(segment->GetType())
+               ? segment->GetLogicalBytes()
+               : payloadBytes;
 }
 
 uint32_t
@@ -218,11 +237,11 @@ TypeId UbTransportChannel::GetTypeId(void)
                       MakeTimeChecker())
         .AddAttribute("RetransTimeoutMode",
                       "Retransmission timeout mode.",
-                      EnumValue(UbRetransTimeoutMode::DYNAMIC),
-                      MakeEnumAccessor(
+                      MakeUbEnumValue(UbRetransTimeoutMode::DYNAMIC),
+                      MakeUbEnumAccessor(
                           &UbTransportChannel::SetRetransTimeoutMode,
                           &UbTransportChannel::GetRetransTimeoutMode),
-                      MakeEnumChecker(UbRetransTimeoutMode::STATIC,
+                      MakeUbEnumChecker(UbRetransTimeoutMode::STATIC,
                                       "STATIC",
                                       UbRetransTimeoutMode::DYNAMIC,
                                       "DYNAMIC"))
@@ -255,11 +274,11 @@ TypeId UbTransportChannel::GetTypeId(void)
                       MakeUintegerChecker<uint64_t>())
         .AddAttribute("RetransmissionMode",
                       "Transport retransmission algorithm.",
-                      EnumValue(UbRetransmissionMode::GBN),
-                      MakeEnumAccessor(
+                      MakeUbEnumValue(UbRetransmissionMode::GBN),
+                      MakeUbEnumAccessor(
                           &UbTransportChannel::SetRetransmissionMode,
                           &UbTransportChannel::GetRetransmissionMode),
-                      MakeEnumChecker(UbRetransmissionMode::GBN,
+                      MakeUbEnumChecker(UbRetransmissionMode::GBN,
                                       "GBN",
                                       UbRetransmissionMode::SELECTIVE,
                                       "SELECTIVE"))
@@ -281,16 +300,18 @@ TypeId UbTransportChannel::GetTypeId(void)
                       MakeBooleanAccessor(&UbTransportChannel::SetSelectiveMarkPsnEnable,
                                           &UbTransportChannel::GetSelectiveMarkPsnEnable),
                       MakeBooleanChecker())
-        .AddAttribute("UsePacketSpray",
-                      "Enable per-packet ECMP/packet spray across multiple paths.",
-                      BooleanValue(false),
-                      MakeBooleanAccessor(&UbTransportChannel::m_usePacketSpray),
-                      MakeBooleanChecker())
-        .AddAttribute("UseShortestPaths",
-                      "Sets a packet header flag that instructs switches to restrict forwarding to shortest paths (true) or allow non-shortest paths (false).",
-                      BooleanValue(true),
-                      MakeBooleanAccessor(&UbTransportChannel::m_useShortestPaths),
-                      MakeBooleanChecker())
+        .AddAttribute("RoutingType",
+                      "UB routing type encoded in the data-link packet header.",
+                      MakeUbEnumValue(RoutingType::PER_FLOW_SHORTEST_PATHS),
+                      MakeUbEnumAccessor(&UbTransportChannel::m_routingType),
+                      MakeUbEnumChecker(RoutingType::PER_FLOW_ALL_PATHS,
+                                      "PER_FLOW_ALL_PATHS",
+                                      RoutingType::PER_PACKET_ALL_PATHS,
+                                      "PER_PACKET_ALL_PATHS",
+                                      RoutingType::PER_FLOW_SHORTEST_PATHS,
+                                      "PER_FLOW_SHORTEST_PATHS",
+                                      RoutingType::PER_PACKET_SHORTEST_PATHS,
+                                      "PER_PACKET_SHORTEST_PATHS"))
         .AddTraceSource("FirstPacketSendsNotify",
                         "Fires when the first packet of a WQE segment is sent.",
                         MakeTraceSourceAccessor(&UbTransportChannel::m_traceFirstPacketSendsNotify),
@@ -483,6 +504,7 @@ UbTransportChannel::GetPsnRecvNxt() const
 void
 UbTransportChannel::TriggerTransportTransmit()
 {
+    RefreshAllocatorSummary();
     Ptr<UbPort> port = DynamicCast<UbPort>(NodeList::GetNode(m_nodeId)->GetDevice(m_sport));
     port->TriggerTransmit();
 }
@@ -587,6 +609,7 @@ UbTransportChannel::PopQueuedPacket(std::queue<Ptr<Packet>>& packetQ)
     if (HasPendingTransmitWork()) {
         m_headArrivalTime = Simulator::Now();
     }
+    NotifyLifecycleStateChanged();
     return packet;
 }
 
@@ -670,31 +693,71 @@ UbTransportChannel::BuildNextDataSendContext(NewDataSendContext& ctx)
     return false;
 }
 
-void
-UbTransportChannel::NotifyNewDataPacketSent(const NewDataSendContext& ctx,
-                                            Ptr<Packet> packet)
+UbGbnPacketDescriptor
+UbTransportChannel::BuildGbnPacketDescriptor(const NewDataSendContext& ctx,
+                                             uint64_t logicalPsn) const
 {
-    // TODO: Keep Notify* helpers as logging/trace notifications only. Retransmission
-    // and congestion-control state updates should live at the actual send trigger.
-    if (IsRetransEnabled()) {
-        m_retrans->OnNewDataPacketSent(m_psnSndNxt,
-                                       packet,
-                                       ctx.payloadBytes);
+    NS_ABORT_MSG_IF(ctx.segment == nullptr, "RTP DATA descriptor requires an exact segment");
+    UbGbnPacketDescriptor descriptor;
+    descriptor.logicalPsn = logicalPsn;
+    descriptor.packetOffsetBytes =
+        static_cast<uint32_t>((IsAtomicTransaction(ctx.segment->GetType()) ? ctx.totalProgressBytes
+                                                                       : ctx.segment->GetSize()) -
+                              ctx.segment->GetBytesLeft());
+    descriptor.progressBytes = ctx.progressBytes;
+    descriptor.payloadBytes = ctx.payloadBytes;
+    descriptor.wireLengthBytes = ctx.wireLengthBytes;
+    descriptor.remoteAddress = ctx.segment->GetRemoteAddress();
+    if (ctx.segment->GetType() == UbTransactionOpcode::WRITE_WITH_REMOTE_SYNC ||
+        ctx.segment->GetType() == UbTransactionOpcode::WRITE_WITH_ATOMIC_STORE_ADD ||
+        ctx.segment->GetType() == UbTransactionOpcode::WRITE_WITH_REMOTE_SYNC_WITH_BE)
+    {
+        descriptor.remoteAddress += descriptor.packetOffsetBytes;
     }
+    descriptor.remoteTokenId = ctx.segment->GetRemoteTokenId();
+    descriptor.transactionFields = ctx.segment->GetTransactionFields();
+    if (ctx.segment->HasExplicitPayload())
+    {
+        descriptor.explicitPayload = ctx.segment->GetExplicitPayload();
+        NS_ABORT_MSG_IF(descriptor.explicitPayload->GetSize() != ctx.totalProgressBytes,
+                        "Explicit WQE segment payload must match the segment transfer size");
+    }
+    descriptor.taskId = ctx.segment->GetTaskId();
+    descriptor.wqeSize = ctx.segment->GetWqeSize();
+    descriptor.taOpcode = ctx.segment->GetType();
+    descriptor.requestOpcode = ctx.segment->GetRequestOpcode();
+    descriptor.segmentKind = ctx.segment->GetSegmentKind();
+    descriptor.taSsn = ctx.segment->GetTaSsn();
+    descriptor.requestTaSsn = ctx.segment->GetRequestTassn();
+    descriptor.order = ctx.segment->GetOrderType();
+    descriptor.originJettyNum = ctx.segment->GetOriginJettyNum();
+    descriptor.tpMsn = ctx.segment->GetTpMsn();
+    descriptor.firstPacket = ctx.segment->GetBytesLeft() == ctx.totalProgressBytes;
+    descriptor.lastPacket = ctx.segment->GetBytesLeft() == ctx.progressBytes;
+    descriptor.hasCorrelation = ctx.segment->HasTransactionCorrelation();
+    if (descriptor.hasCorrelation) {
+        descriptor.correlation = ctx.segment->GetTransactionCorrelation();
+    }
+    return descriptor;
+}
 
-    m_congestionCtrl->OnSenderDataPacketSent(UbTpPsnSequence::ToWire(m_psnSndNxt),
-                                             ctx.progressBytes);
+void
+UbTransportChannel::NotifyDataPacketSent(const UbGbnPacketDescriptor& descriptor,
+                                         Ptr<Packet> packet)
+{
+    m_congestionCtrl->OnSenderDataPacketSent(UbTpPsnSequence::ToWire(descriptor.logicalPsn),
+                                             descriptor.progressBytes);
 
-    if (ctx.segment->GetBytesLeft() == ctx.totalProgressBytes) {
-        FirstPacketSendsNotify(m_nodeId, ctx.segment->GetTaskId(), m_tpn, m_dstTpn,
-                               UbTpMsnSequence::ToWire(ctx.segment->GetTpMsn()),
-                               UbTpPsnSequence::ToWire(m_psnSndNxt),
+    if (descriptor.firstPacket) {
+        FirstPacketSendsNotify(m_nodeId, descriptor.taskId, m_tpn, m_dstTpn,
+                               UbTpMsnSequence::ToWire(descriptor.tpMsn),
+                               UbTpPsnSequence::ToWire(descriptor.logicalPsn),
                                m_sport);
     }
-    if (ctx.segment->GetBytesLeft() == ctx.progressBytes) {
-        LastPacketSendsNotify(m_nodeId, ctx.segment->GetTaskId(), m_tpn, m_dstTpn,
-                              UbTpMsnSequence::ToWire(ctx.segment->GetTpMsn()),
-                              UbTpPsnSequence::ToWire(m_psnSndNxt),
+    if (descriptor.lastPacket) {
+        LastPacketSendsNotify(m_nodeId, descriptor.taskId, m_tpn, m_dstTpn,
+                              UbTpMsnSequence::ToWire(descriptor.tpMsn),
+                              UbTpPsnSequence::ToWire(descriptor.logicalPsn),
                               m_sport);
     }
 
@@ -702,12 +765,12 @@ UbTransportChannel::NotifyNewDataPacketSent(const NewDataSendContext& ctx,
               << " PacketUid: " << packet->GetUid()
               << " Tpn: " << m_tpn
               << " DstTpn: " << m_dstTpn
-              << " Psn: " << m_psnSndNxt
+              << " Psn: " << descriptor.logicalPsn
               << " PacketType: Packet"
               << " Src: " << m_src
               << " Dst: " << m_dest
               << " PacketSize: " << packet->GetSize()
-              << " TaskId: " << ctx.segment->GetTaskId());
+              << " TaskId: " << descriptor.taskId);
 }
 
 void
@@ -734,7 +797,7 @@ UbTransportChannel::AdvanceNewDataSendState(const NewDataSendContext& ctx,
 
     // Shallow pipeline keeps a small active and unacked segment budget.
     if (ctx.segment->IsSentCompleted() && CanScheduleAnotherSegment()) {
-        ApplyNextWqeSegment();
+        TryContinueJettyTransmission();
     }
     if (HasPendingTransmitWork()) {
         m_headArrivalTime = Simulator::Now();
@@ -744,12 +807,35 @@ UbTransportChannel::AdvanceNewDataSendState(const NewDataSendContext& ctx,
 Ptr<Packet>
 UbTransportChannel::SendNewDataPacket(const NewDataSendContext& ctx)
 {
-    Ptr<Packet> packet = GenDataPacket(ctx.segment,
-                                       ctx.payloadBytes,
-                                       ctx.wireLengthBytes,
-                                       ctx.progressBytes);
-    NotifyNewDataPacketSent(ctx, packet);
+    UbGbnPacketDescriptor descriptor = BuildGbnPacketDescriptor(ctx, m_psnSndNxt);
+    Ptr<Packet> packet = BuildRtpDataPacket(descriptor);
+    descriptor.serializedSizeBytes = packet->GetSize();
+    if (IsRetransEnabled()) {
+        m_retrans->OnNewDataPacketSent(descriptor);
+    }
+    NotifyDataPacketSent(descriptor, packet);
     AdvanceNewDataSendState(ctx, packet);
+    return packet;
+}
+
+Ptr<Packet>
+UbTransportChannel::SendGbnRetransmission(const UbGbnPacketDescriptor& descriptor)
+{
+    if (m_congestionCtrl->IsCcLimited(descriptor.progressBytes)) {
+        m_sendWindowLimited = true;
+        return nullptr;
+    }
+    Ptr<Packet> packet = BuildRtpDataPacket(descriptor);
+    NotifyDataPacketSent(descriptor, packet);
+    m_retrans->StartTimerIfNeeded();
+    return packet;
+}
+
+Ptr<Packet>
+UbTransportChannel::SendSelectiveRetransmission(const UbGbnPacketDescriptor& descriptor)
+{
+    Ptr<Packet> packet = BuildRtpDataPacket(descriptor);
+    OnSelectiveRetransmissionPacketSent(descriptor.logicalPsn, descriptor.payloadBytes);
     return packet;
 }
 
@@ -770,14 +856,18 @@ UbTransportChannel::TryGetNextNewDataPacket()
 
 Ptr<Packet> UbTransportChannel::GetNextPacket()
 {
+    auto finish = [this](Ptr<Packet> packet) {
+        RefreshAllocatorSummary();
+        return packet;
+    };
     Ptr<Packet> packet = PopQueuedPacket(m_cnpQ);
     if (packet != nullptr) {
-        return packet;
+        return finish(packet);
     }
 
     packet = PopQueuedPacket(m_ackQ);
     if (packet != nullptr) {
-        return packet;
+        return finish(packet);
     }
 
     if (IsRetransEnabled()) {
@@ -786,14 +876,17 @@ Ptr<Packet> UbTransportChannel::GetNextPacket()
             if (HasPendingTransmitWork()) {
                 m_headArrivalTime = Simulator::Now();
             }
-            return packet;
+            return finish(packet);
+        }
+        if (m_retrans->HasPendingGbnRetransmission()) {
+            return finish(nullptr);
         }
         if (HasPendingSelectiveRetransmissionWork()) {
-            return nullptr;
+            return finish(nullptr);
         }
     }
 
-    return TryGetNextNewDataPacket();
+    return finish(TryGetNextNewDataPacket());
 }
 
 void
@@ -808,19 +901,19 @@ UbTransportChannel::EnqueueDcqcnCnp(uint8_t ecn, bool location)
     UbIpBasedNetworkHeader networkHeader;
     cnp->AddHeader(networkHeader);
 
-    UbDataLink::GenPacketHeader(cnp,
+    UbDataLink::AddPacketHeader(cnp,
                                 false,
                                 false,
                                 packetVl,
                                 packetVl,
-                                m_usePacketSpray,
-                                m_useShortestPaths,
+                                m_routingType,
                                 UbDatalinkHeaderConfig::PACKET_IPV4);
 
     if (m_cnpQ.empty() && m_ackQ.empty() && m_wqeSegmentVector.empty()) {
         m_headArrivalTime = Simulator::Now();
     }
     m_cnpQ.push(cnp);
+    RefreshAllocatorSummary();
 
     Ptr<UbPort> port = DynamicCast<UbPort>(NodeList::GetNode(m_nodeId)->GetDevice(m_sport));
     if (port != nullptr) {
@@ -853,31 +946,61 @@ UbTransportChannel::BuildDcqcnCnp(uint8_t ecn, bool location) const
     return cnp;
 }
 
-uint32_t UbTransportChannel::GetNextPacketSize()
+/**
+ * Bytes the single outgoing data packet carries outside its payload.
+ *
+ * The transaction part is exactly the rule-driven header plan that BuildRtpDataPacket serializes;
+ * the stack part is the network stack that packet actually traverses.
+ */
+uint32_t
+UbTransportChannel::GetDataPacketHeaderBytes(UbTransactionOpcode opcode,
+                                             UbTransactionSegmentKind segmentKind,
+                                             const UbTransactionFields& fields) const
 {
-    uint32_t pktSize = 0;
-    UbMAExtTah MAExtTaHeader;
-    UbTransactionHeader TransactionHeader;
-    UbTransportHeader  TransportHeader;
-    UdpHeader   UHeader;
-    Ipv4Header  I4Header;
-    UbDatalinkPacketHeader  DataLinkPacketHeader;
+    UbTransportHeader transportHeader;
+    UdpHeader udpHeader;
+    Ipv4Header ipv4Header;
+    UbIpBasedNetworkHeader networkHeader;
+    UbDatalinkPacketHeader dataLinkHeader;
+    const uint32_t stackBytes = transportHeader.GetSerializedSize() +
+                                udpHeader.GetSerializedSize() +
+                                ipv4Header.GetSerializedSize() +
+                                networkHeader.GetSerializedSize() +
+                                dataLinkHeader.GetSerializedSize();
 
-    uint32_t MAExtTaHeaderSize = MAExtTaHeader.GetSerializedSize();
-    uint32_t UbTransactionHeaderSize = TransactionHeader.GetSerializedSize();
-    uint32_t UbTransportHeaderSize = TransportHeader.GetSerializedSize();
-    uint32_t UdpHeaderSize = UHeader.GetSerializedSize();
-    uint32_t Ipv4HeaderSize = I4Header.GetSerializedSize();
-    uint32_t UbDataLinkPktSize = DataLinkPacketHeader.GetSerializedSize();
+    const auto* rule = FindTransactionRule(opcode);
+    uint32_t transactionBytes = UB_TA_FULL_BASE_HEADER_BYTES;
+    if (rule != nullptr)
+    {
+        const UbTaHeaderPlan plan =
+            segmentKind == UbTransactionSegmentKind::RESPONSE
+                ? UbTaHeaderPlan::ForResponse(*rule)
+                : UbTaHeaderPlan::ForRequest(*rule, DeclareRequestHeaderPresence(*rule, fields));
+        transactionBytes = GetFullTaHeaderBytes(plan, fields);
+    }
+    return stackBytes + transactionBytes;
+}
 
-    uint32_t headerSize = MAExtTaHeaderSize + UbTransactionHeaderSize + UbTransportHeaderSize
-                          + UdpHeaderSize + Ipv4HeaderSize + UbDataLinkPktSize;
-
+uint32_t
+UbTransportChannel::GetNextPacketSize()
+{
     if (!m_cnpQ.empty()) {
         return m_cnpQ.front()->GetSize();
     }
     if (!m_ackQ.empty()) {
         return m_ackQ.front()->GetSize();
+    }
+    if (m_retrans->HasPendingGbnRetransmission()) {
+        const UbGbnPacketDescriptor* descriptor =
+            m_retrans->GetNextGbnRetransmissionDescriptor();
+        NS_ABORT_MSG_IF(descriptor == nullptr, "pending GBN retransmission requires a descriptor");
+        return descriptor->payloadBytes +
+               GetDataPacketHeaderBytes(descriptor->segmentKind ==
+                                                UbTransactionSegmentKind::RESPONSE
+                                            ? descriptor->requestOpcode
+                                            : descriptor->taOpcode,
+                                        descriptor->segmentKind,
+                                        descriptor->transactionFields);
     }
     const uint32_t selectiveRetransmissionSize =
         HasPendingSelectiveRetransmissionWork()
@@ -893,54 +1016,118 @@ uint32_t UbTransportChannel::GetNextPacketSize()
         }
         const uint32_t progressBytes = GetProgressBytesThisPacket(currentSegment);
         const uint32_t payloadSize = GetPayloadBytesThisPacket(currentSegment, progressBytes);
-        pktSize = payloadSize + headerSize;
-        return pktSize;
+        const UbTransactionOpcode wireOpcode =
+            currentSegment->GetSegmentKind() == UbTransactionSegmentKind::RESPONSE
+                ? currentSegment->GetRequestOpcode()
+                : currentSegment->GetType();
+        return payloadSize + GetDataPacketHeaderBytes(wireOpcode,
+                                                      currentSegment->GetSegmentKind(),
+                                                      currentSegment->GetTransactionFields());
     }
-    return pktSize;
+    return 0;
 }
 Ptr<Packet> UbTransportChannel::GenDataPacket(Ptr<UbWqeSegment> wqeSegment,
                                               uint32_t payloadSize,
                                               uint32_t wireLengthBytes,
                                               uint32_t progressBytes)
 {
-    Ptr<Packet> p = Create<Packet>(payloadSize);
-    UbFlowTag flowTag(wqeSegment->GetTaskId(), wqeSegment->GetWqeSize());
+    NewDataSendContext ctx;
+    ctx.segment = wqeSegment;
+    ctx.progressBytes = progressBytes;
+    ctx.payloadBytes = payloadSize;
+    ctx.wireLengthBytes = wireLengthBytes;
+    ctx.totalProgressBytes = GetTotalProgressBytes(wqeSegment);
+    return BuildRtpDataPacket(BuildGbnPacketDescriptor(ctx, m_psnSndNxt));
+}
+
+Ptr<Packet>
+UbTransportChannel::BuildRtpDataPacket(const UbGbnPacketDescriptor& descriptor)
+{
+    Ptr<Packet> p;
+    if (descriptor.explicitPayload != nullptr)
+    {
+        NS_ABORT_MSG_IF(descriptor.packetOffsetBytes > descriptor.explicitPayload->GetSize() ||
+                            descriptor.payloadBytes >
+                                descriptor.explicitPayload->GetSize() -
+                                    descriptor.packetOffsetBytes,
+                        "Explicit RTP payload descriptor exceeds its immutable payload");
+        p = descriptor.explicitPayload->CreateFragment(descriptor.packetOffsetBytes,
+                                                       descriptor.payloadBytes);
+        p->AddPacketTag(UbExplicitPayloadTag{});
+    }
+    else
+    {
+        p = Create<Packet>(descriptor.payloadBytes);
+    }
+    UbFlowTag flowTag(descriptor.taskId, descriptor.wqeSize);
     p->AddPacketTag(flowTag);
-    // add UbMAExtTah
-    UbMAExtTah MAExtTaHeader;
-    MAExtTaHeader.SetLength(wireLengthBytes);
-    p->AddHeader(MAExtTaHeader);
-    // add TaHeader
-    UbTransactionHeader TaHeader;
-    TaHeader.SetTaOpcode(wqeSegment->GetType());
+    if (descriptor.hasCorrelation)
+    {
+        UbTransactionCorrelationTag correlationTag;
+        correlationTag.SetIdentity(descriptor.correlation);
+        p->AddPacketTag(correlationTag);
+    }
+    // The rule-driven plan owns the wire order and presence of every declared header.
+    const auto* rule = FindTransactionRule(descriptor.segmentKind == UbTransactionSegmentKind::RESPONSE
+                                               ? descriptor.requestOpcode
+                                               : descriptor.taOpcode);
+    UbTaHeaderPlan plan;
+    if (rule != nullptr)
+    {
+        plan = descriptor.segmentKind == UbTransactionSegmentKind::RESPONSE
+                   ? UbTaHeaderPlan::ForResponse(*rule)
+                   : UbTaHeaderPlan::ForRequest(
+                         *rule,
+                         DeclareRequestHeaderPresence(*rule, descriptor.transactionFields));
+    }
+    UbMAExtTah memory;
+    memory.SetVirtualAddress(descriptor.remoteAddress);
+    memory.SetTokenId(descriptor.remoteTokenId);
+    memory.SetLength(descriptor.wireLengthBytes == 0
+                         ? std::max(1u, descriptor.payloadBytes)
+                         : descriptor.wireLengthBytes);
+    UbFullTaHeader base;
+    base.isResponse = descriptor.segmentKind == UbTransactionSegmentKind::RESPONSE;
+    // Requests use BTAH; transaction responses use the corresponding ATAH.
     const uint16_t wireIniTaSsn =
-        wqeSegment->GetSegmentKind() == UbTransactionSegmentKind::RESPONSE
-            ? UbTaSsnSequence::ToWire(wqeSegment->GetRequestTassn())
-            : UbTaSsnSequence::ToWire(wqeSegment->GetTaSsn());
-    TaHeader.SetIniTaSsn(wireIniTaSsn);
-    TaHeader.SetOrder(wqeSegment->GetOrderType());
-    TaHeader.SetIniRcType(0x01);
-    TaHeader.SetIniRcId(wqeSegment->GetOriginJettyNum());
-    p->AddHeader(TaHeader);
+        descriptor.segmentKind == UbTransactionSegmentKind::RESPONSE
+            ? UbTaSsnSequence::ToWire(descriptor.requestTaSsn)
+            : UbTaSsnSequence::ToWire(descriptor.taSsn);
+    if (descriptor.segmentKind == UbTransactionSegmentKind::RESPONSE)
+    {
+        auto& ackHeader = base.response;
+        ackHeader.SetUbTransactionOpcode(descriptor.taOpcode);
+        ackHeader.SetIniTaSsn(wireIniTaSsn);
+        ackHeader.SetIniRcType(0x01);
+        ackHeader.SetIniRcId(descriptor.originJettyNum);
+    }
+    else
+    {
+        auto& taHeader = base.request;
+        taHeader.SetUbTransactionOpcode(descriptor.taOpcode);
+        taHeader.SetIniTaSsn(wireIniTaSsn);
+        taHeader.SetOrder(descriptor.order);
+        taHeader.SetIniRcType(0x01);
+        taHeader.SetIniRcId(descriptor.originJettyNum);
+    }
+    PrependFullTaHeaders(p, base, plan, memory, descriptor.transactionFields);
     // add TpHeader
     UbTransportHeader TpHeader;
-    if (wqeSegment->GetBytesLeft() == progressBytes) {
-        TpHeader.SetLastPacket(true); // last packet
-    } else {
-        TpHeader.SetLastPacket(false); // not last packet
-    }
+    TpHeader.SetLastPacket(descriptor.lastPacket);
     TpHeader.SetTPOpcode(0x1);
     TpHeader.SetNLP(0x0);
     TpHeader.SetSrcTpn(m_tpn);
     TpHeader.SetDestTpn(m_dstTpn);
     TpHeader.SetAckRequest(1);
     TpHeader.SetErrorFlag(0);
-    TpHeader.SetPsn(UbTpPsnSequence::ToWire(m_psnSndNxt));
-    TpHeader.SetTpMsn(UbTpMsnSequence::ToWire(wqeSegment->GetTpMsn()));
+    TpHeader.SetPsn(UbTpPsnSequence::ToWire(descriptor.logicalPsn));
+    TpHeader.SetTpMsn(UbTpMsnSequence::ToWire(descriptor.tpMsn));
     p->AddHeader(TpHeader);
     // Packet-spray hashing must be derived from packet identity, not from the order in which
     // worker threads happen to call this function.
-    m_lbHashSalt = m_usePacketSpray ? UbTpPsnSequence::ToWire(m_psnSndNxt) : 0;
+    m_lbHashSalt = RoutingTypeIsPerPacket(m_routingType)
+                       ? UbTpPsnSequence::ToWire(descriptor.logicalPsn)
+                       : 0;
     UbPort::AddUdpHeader(p, this);
     // add ipv4 header
     UbPort::AddIpv4Header(p, this);
@@ -949,24 +1136,27 @@ Ptr<Packet> UbTransportChannel::GenDataPacket(Ptr<UbWqeSegment> wqeSegment,
     m_congestionCtrl->OnSenderPrepareIpBasedNetworkHeader(networkHeader);
     p->AddHeader(networkHeader);
     // add dl header
-    UbDataLink::GenPacketHeader(p, false, false, m_priority, m_priority, m_usePacketSpray,
-                                m_useShortestPaths, UbDatalinkHeaderConfig::PACKET_IPV4);
+    UbDataLink::AddPacketHeader(p,
+                                false,
+                                false,
+                                m_priority,
+                                m_priority,
+                                m_routingType,
+                                UbDatalinkHeaderConfig::PACKET_IPV4);
     return p;
 }
 
-Ptr<UbWqeSegment> UbTransportChannel::TrackInboundTaPacket(const UbTransportHeader& tpHeader,
-                                                           const UbTransactionHeader& taHeader,
-                                                           uint32_t resLenBytes,
-                                                           uint32_t payloadBytes,
-                                                           uint32_t taskId)
+Ptr<UbWqeSegment>
+UbTransportChannel::TrackInboundTaPacket(const BufferedInboundPacket& packet)
 {
-    const uint32_t srcTpn = tpHeader.GetSrcTpn();
+    const uint32_t srcTpn = packet.tpHeader.GetSrcTpn();
     uint64_t& tpMsnReference = m_inboundTpMsnReferences[srcTpn];
-    const uint64_t logicalTpMsn = UbTpMsnSequence::Unwrap(tpHeader.GetTpMsn(), tpMsnReference);
-    const auto taSsnKey = std::make_pair(srcTpn, taHeader.GetIniRcId());
+    const uint64_t logicalTpMsn =
+        UbTpMsnSequence::Unwrap(packet.tpHeader.GetTpMsn(), tpMsnReference);
+    const auto taSsnKey = std::make_pair(srcTpn, packet.taHeader.GetIniRcId());
     uint32_t& taSsnReference = m_inboundTaSsnReferences[taSsnKey];
     const uint32_t logicalTaSsn =
-        UbTaSsnSequence::Unwrap(taHeader.GetIniTaSsn(), taSsnReference);
+        UbTaSsnSequence::Unwrap(packet.taHeader.GetIniTaSsn(), taSsnReference);
     const auto key = std::make_pair(srcTpn, logicalTpMsn);
     auto& state = m_inboundTaUnits[key];
     tpMsnReference = std::max<uint64_t>(tpMsnReference, logicalTpMsn + 1);
@@ -979,49 +1169,102 @@ Ptr<UbWqeSegment> UbTransportChannel::TrackInboundTaPacket(const UbTransportHead
         state.segment->SetSport(m_dport);
         state.segment->SetDport(m_sport);
         state.segment->SetPriority(m_priority);
-        state.segment->SetTaskId(taskId);
+        state.segment->SetTaskId(packet.taskId);
         state.segment->SetWqeSize(0);
-        state.segment->SetJettyNum(taHeader.GetIniRcId());
+        state.segment->SetJettyNum(packet.taHeader.GetIniRcId());
         state.segment->SetTaMsn(logicalTpMsn);
         state.segment->SetTaSsn(logicalTaSsn);
-        state.segment->SetOriginJettyNum(taHeader.GetIniRcId());
+        state.segment->SetOriginJettyNum(packet.taHeader.GetIniRcId());
         state.segment->SetRequestTassn(logicalTaSsn);
+        state.segment->SetResolvedTpIdentity(m_lifecycleOwner);
         state.segment->SetTpMsn(logicalTpMsn);
         state.segment->SetTpn(m_tpn);
+        state.segment->SetRemoteAddress(packet.remoteAddress);
+        state.segment->SetRemoteTokenId(packet.remoteTokenId);
+        auto fields = packet.transactionFields;
+        if (!fields.memoryAccess && packet.taHeader.GetUbTransactionOpcode() !=
+                                     static_cast<uint8_t>(UbTransactionOpcode::SEND) &&
+            packet.taHeader.GetUbTransactionOpcode() !=
+                                     static_cast<uint8_t>(UbTransactionOpcode::SEND_WITH_IMMEDIATE) &&
+            packet.taHeader.GetUbTransactionOpcode() !=
+                                     static_cast<uint8_t>(UbTransactionOpcode::MANAGEMENT))
+        {
+            fields.memoryAccess = UbMemoryAccessFields{packet.remoteAddress,
+                                                       packet.remoteTokenId,
+                                                       packet.resLenBytes};
+        }
+        state.segment->SetTransactionFields(fields);
+    }
+    if (packet.hasTransactionCorrelation)
+    {
+        NS_ABORT_MSG_IF(state.segment->HasTransactionCorrelation() &&
+                            state.segment->GetTransactionCorrelation() !=
+                                packet.transactionCorrelation,
+                        "Packets for one inbound Transaction unit have different correlations");
+        state.segment->SetTransactionCorrelation(packet.transactionCorrelation);
     }
 
-    const auto taOpcode = static_cast<TaOpcode>(taHeader.GetTaOpcode());
-    const bool isReadRequest = taOpcode == TaOpcode::TA_OPCODE_READ;
-    const bool isReadResponse = taOpcode == TaOpcode::TA_OPCODE_READ_RESPONSE;
-    const bool isTransactionAck = taOpcode == TaOpcode::TA_OPCODE_TRANSACTION_ACK;
+    const auto taOpcode = static_cast<UbTransactionOpcode>(packet.taHeader.GetUbTransactionOpcode());
+    const bool isReadRequest = taOpcode == UbTransactionOpcode::READ;
+    const bool isReadResponse = taOpcode == UbTransactionOpcode::READ_RESPONSE;
+    const bool isAtomic = IsAtomicTransaction(taOpcode);
+    const bool isAtomicResponse = taOpcode == UbTransactionOpcode::ATOMIC_RESPONSE;
+    const bool isTransactionAck = taOpcode == UbTransactionOpcode::TAACK;
     state.segment->SetType(taOpcode);
-    state.segment->SetOrderType(static_cast<OrderType>(taHeader.GetOrder()));
-    state.segment->SetSegmentKind(
-        isTransactionAck || isReadResponse
-            ? UbTransactionSegmentKind::RESPONSE
-            : UbTransactionSegmentKind::REQUEST);
+    state.segment->SetOrderType(static_cast<OrderType>(packet.taHeader.GetOrder()));
+    state.segment->SetSegmentKind(isTransactionAck || isReadResponse || isAtomicResponse
+                                      ? UbTransactionSegmentKind::RESPONSE
+                                      : UbTransactionSegmentKind::REQUEST);
     if (isTransactionAck)
     {
-        state.segment->SetRequestOpcode(TaOpcode::TA_OPCODE_WRITE);
+        state.segment->SetRequestOpcode(UbTransactionOpcode::WRITE);
     }
     else if (isReadResponse)
     {
-        state.segment->SetRequestOpcode(TaOpcode::TA_OPCODE_READ);
+        state.segment->SetRequestOpcode(UbTransactionOpcode::READ);
     }
     else
     {
         state.segment->SetRequestOpcode(taOpcode);
     }
-    state.segment->SetResponseBytes(isReadRequest ? resLenBytes : (isReadResponse ? payloadBytes : 0));
-    state.segment->SetNeedsTransactionResponse(
-        taOpcode == TaOpcode::TA_OPCODE_WRITE || isReadRequest);
+    state.segment->SetResponseBytes(
+        isReadRequest ? packet.resLenBytes
+                      : ((isReadResponse || isAtomicResponse) ? packet.payloadBytes : 0));
+    const auto* rule = FindTransactionRule(taOpcode);
+    state.segment->SetNeedsTransactionResponse(rule != nullptr &&
+                                               rule->role == UbTransactionSegmentKind::REQUEST &&
+                                               rule->requiresResponse);
 
-    state.bytesReceived += payloadBytes;
-    if (isReadRequest)
+    state.bytesReceived += packet.payloadBytes;
+    if (packet.explicitPayload != nullptr)
     {
-        state.segment->SetSize(resLenBytes);
-        state.segment->SetWqeSize(resLenBytes);
-        state.segment->SetResLenBytes(resLenBytes);
+        if (state.explicitPayload == nullptr)
+        {
+            state.explicitPayload = Create<Packet>();
+        }
+        state.explicitPayload->AddAtEnd(packet.explicitPayload);
+    }
+    if (isAtomic)
+    {
+        if (!packet.tpHeader.GetLastPacket())
+        {
+            std::cerr << "Rejected RTP atomic taskId=" << packet.taskId << ": "
+                      << "request must fit one packet" << std::endl;
+            m_inboundTaUnits.erase(key);
+            return nullptr;
+        }
+        state.segment->SetSize(packet.resLenBytes);
+        state.segment->SetWqeSize(packet.resLenBytes);
+        state.segment->SetLogicalBytes(packet.resLenBytes);
+        state.segment->SetPayloadBytes(state.bytesReceived);
+        state.segment->SetCarrierBytes(state.bytesReceived);
+    }
+    else if (isReadRequest)
+    {
+        state.segment->SetSize(packet.resLenBytes);
+        state.segment->SetWqeSize(packet.resLenBytes);
+        state.segment->SetResLenBytes(packet.resLenBytes);
+        state.segment->SetLogicalBytes(packet.resLenBytes);
         state.segment->SetPayloadBytes(0);
         state.segment->SetCarrierBytes(1);
     }
@@ -1030,16 +1273,51 @@ Ptr<UbWqeSegment> UbTransportChannel::TrackInboundTaPacket(const UbTransportHead
         state.segment->SetSize(state.bytesReceived);
         state.segment->SetWqeSize(state.bytesReceived);
         state.segment->SetResLenBytes(state.bytesReceived);
+        state.segment->SetLogicalBytes(state.bytesReceived);
         state.segment->SetPayloadBytes(state.bytesReceived);
         state.segment->SetCarrierBytes(state.bytesReceived);
     }
 
-    if (!tpHeader.GetLastPacket())
+    if (!packet.tpHeader.GetLastPacket())
     {
         return nullptr;
     }
 
+    // The TA unit is assembled: this is the one place an inbound request is normalized and its
+    // cached resolved result is produced. Missing required headers are rejected, never defaulted.
+    if (rule != nullptr && rule->role == UbTransactionSegmentKind::REQUEST &&
+        !state.segment->HasTransactionResolved())
+    {
+        UbTransactionRequestInput request;
+        request.opcode = taOpcode;
+        request.logicalBytes = state.segment->GetLogicalBytes();
+        request.payloadBytes = state.segment->GetPayloadBytes();
+        request.fields = state.segment->GetTransactionFields();
+        // One RTP TA unit is one segment; only Atomic requests must additionally fit the MTU.
+        request.maxPayloadBytes =
+            IsAtomicTransaction(taOpcode) ? UB_MTU_BYTE : UINT32_MAX;
+        request.origin = UbTransactionRequestOrigin::INBOUND_DECODE;
+        const auto validation = ValidateTransactionRequest(request);
+        if (!validation.IsValid())
+        {
+            std::cerr << "Rejected RTP transaction taskId=" << packet.taskId
+                      << " opcode=" << static_cast<uint32_t>(taOpcode)
+                      << " logical=" << state.segment->GetLogicalBytes()
+                      << " payload=" << state.segment->GetPayloadBytes() << ": "
+                      << validation.message << std::endl;
+            m_inboundTaUnits.erase(key);
+            return nullptr;
+        }
+        state.segment->SetResponseBytes(validation.resolved.responsePayloadBytes);
+        state.segment->SetTransactionResolved(validation.resolved);
+    }
+
     Ptr<UbWqeSegment> completed = state.segment;
+    if (state.explicitPayload != nullptr &&
+        state.explicitPayload->GetSize() == state.bytesReceived)
+    {
+        completed->SetExplicitPayload(state.explicitPayload);
+    }
     m_inboundTaUnits.erase(key);
     return completed;
 }
@@ -1053,6 +1331,13 @@ bool UbTransportChannel::ShouldCompleteOnTpAck(const Ptr<UbWqeSegment>& segment)
     if (segment->GetSegmentKind() == UbTransactionSegmentKind::RESPONSE)
     {
         return false;
+    }
+    // A transport ACK only retires the wire segment. A request whose rule requires a transaction
+    // response keeps its success completion until that response has been validated, so the cached
+    // normalized result is the single source of truth.
+    if (segment->HasTransactionResolved())
+    {
+        return !segment->GetTransactionResolved().requiresResponse;
     }
     return !segment->NeedsTransactionResponse();
 }
@@ -1128,14 +1413,12 @@ UbTransportChannel::GetResponseOpcodeForRetrans(bool selectiveAck) const
 void
 UbTransportChannel::RetainSentPsnForTest(uint64_t psn, uint32_t payloadBytes)
 {
-    Ptr<Packet> packet = Create<Packet>(payloadBytes);
-    UbTransportHeader tpHeader;
-    tpHeader.SetTPOpcode(TpOpcode::TP_OPCODE_RELIABLE_TA);
-    tpHeader.SetSrcTpn(m_tpn);
-    tpHeader.SetDestTpn(m_dstTpn);
-    tpHeader.SetPsn(UbTpPsnSequence::ToWire(psn));
-    packet->AddHeader(tpHeader);
-    m_retrans->OnNewDataPacketSent(psn, packet, payloadBytes);
+    UbGbnPacketDescriptor descriptor;
+    descriptor.logicalPsn = psn;
+    descriptor.payloadBytes = payloadBytes;
+    descriptor.wireLengthBytes = payloadBytes;
+    descriptor.serializedSizeBytes = payloadBytes + UbTransportHeader().GetSerializedSize();
+    m_retrans->OnNewDataPacketSent(descriptor);
     m_psnSndNxt = std::max(m_psnSndNxt, psn + 1);
 }
 
@@ -1167,6 +1450,52 @@ uint32_t
 UbTransportChannel::GetPsnRetransmitCountForTest(uint64_t psn) const
 {
     return m_retrans->GetPsnRetransmitCountForTest(psn);
+}
+
+uint32_t
+UbTransportChannel::GetGbnDescriptorCountForTest() const
+{
+    return m_retrans->GetGbnDescriptorCountForTest();
+}
+
+bool
+UbTransportChannel::HasGbnDescriptorForTest(uint64_t psn) const
+{
+    return m_retrans->HasGbnDescriptorForTest(psn);
+}
+
+uint64_t
+UbTransportChannel::GetGbnRetransmissionCursorForTest() const
+{
+    return m_retrans->GetGbnRetransmissionCursorForTest();
+}
+
+void
+UbTransportChannel::RetainGbnDescriptorForTest(uint64_t psn)
+{
+    UbGbnPacketDescriptor descriptor;
+    descriptor.logicalPsn = psn;
+    m_retrans->RetainGbnDescriptorForTest(descriptor);
+}
+
+bool
+UbTransportChannel::IsRetransTimerRunningForTest() const
+{
+    return m_retrans->HasTimerRunning();
+}
+
+uint64_t
+UbTransportChannel::GetSegmentBytesLeftForTest(uint32_t taskId) const
+{
+    const auto segment = std::find_if(m_wqeSegmentVector.begin(),
+                                      m_wqeSegmentVector.end(),
+                                      [taskId](const Ptr<UbWqeSegment>& candidate) {
+                                          return candidate != nullptr &&
+                                                 candidate->GetTaskId() == taskId;
+                                      });
+    NS_ABORT_MSG_IF(segment == m_wqeSegmentVector.end(),
+                    "Segment progress query references an unknown task");
+    return (*segment)->GetBytesLeft();
 }
 
 bool
@@ -1257,9 +1586,9 @@ UbTransportChannel::HandleReceivedTpNak(const TransportResponseContext& ctx)
         ctx.packet->PeekPacketTag(flowTag);
         UbPacketTraceTag traceTag;
         ctx.packet->PeekPacketTag(traceTag);
-        TpRecvNotify({ctx.packet->GetUid(), UbTpPsnSequence::ToWire(nakPsn), m_dest, m_src, m_dstTpn, m_tpn,
+        TpRecvNotify(ctx.packet->GetUid(), UbTpPsnSequence::ToWire(nakPsn), m_dest, m_src, m_dstTpn, m_tpn,
                      PacketType::NAK, ctx.packet->GetSize(), flowTag.GetFlowId(),
-                     FormatSimpleAckInfo("TPNAK", nakPsn), traceTag});
+                     FormatSimpleAckInfo("TPNAK", nakPsn), traceTag);
     }
 
     if (!IsRetransEnabled()) {
@@ -1307,11 +1636,11 @@ UbTransportChannel::HandleReceivedAckOrSack(const TransportResponseContext& ctx,
         ctx.packet->PeekPacketTag(flowTag);
         UbPacketTraceTag traceTag;
         ctx.packet->PeekPacketTag(traceTag);
-        TpRecvNotify({ctx.packet->GetUid(), ctx.transportHeader.GetPsn(),
+        TpRecvNotify(ctx.packet->GetUid(), ctx.transportHeader.GetPsn(),
                      m_dest, m_src, m_dstTpn, m_tpn,
                      PacketType::SACK, ctx.packet->GetSize(), flowTag.GetFlowId(),
                      FormatSelectiveAckInfo(ctx.transportHeader, ctx.selectiveAckHeader),
-                     traceTag});
+                     traceTag);
     }
 
     if (!ctx.hasSaetph) {
@@ -1410,7 +1739,7 @@ UbTransportChannel::CompleteAckedWqeSegments(const TransportResponseContext& ctx
 
         m_wqeSegmentVector.erase(m_wqeSegmentVector.begin() + i);
         if (CanScheduleAnotherSegment()) {
-            ApplyNextWqeSegment();
+            TryContinueJettyTransmission();
         }
     }
 }
@@ -1421,13 +1750,14 @@ UbTransportChannel::UpdateSenderAfterTransportAck(const TransportResponseContext
 {
     if (m_tpFullFlag && IsWqeSegmentLimited() == false) {
         m_tpFullFlag = false;
-        ApplyNextWqeSegment();
+        TryContinueJettyTransmission();
     }
     if (IsRetransEnabled() && m_wqeSegmentVector.size() == 0) {
         m_retrans->CancelTimer();
     }
 
     const bool transportIdle = !HasPendingTransmitWork();
+    RefreshAllocatorSummary();
     if (transportIdle) {
         m_congestionCtrl->OnSenderTransportIdle();
     }
@@ -1464,11 +1794,11 @@ UbTransportChannel::FinalizeTransportAckProgress(const TransportResponseContext&
             ctx.packet->PeekPacketTag(flowTag);
             UbPacketTraceTag traceTag;
             ctx.packet->PeekPacketTag(traceTag);
-            TpRecvNotify({ctx.packet->GetUid(), UbTpPsnSequence::ToWire(m_psnSndUna - 1),
+            TpRecvNotify(ctx.packet->GetUid(), UbTpPsnSequence::ToWire(m_psnSndUna - 1),
                          m_dest, m_src, m_dstTpn, m_tpn,
                          PacketType::ACK, ctx.packet->GetSize(), flowTag.GetFlowId(),
                          FormatSimpleAckInfo("TPACK", ctx.transportHeader.GetPsn()),
-                         traceTag});
+                         traceTag);
         }
 
         // Only real ACK progress resets the RTO state and reschedules timeout.
@@ -1520,6 +1850,7 @@ void UbTransportChannel::RecvTpAck(Ptr<Packet> p)
     }
 
     FinalizeTransportAckProgress(ctx, previousSndUna);
+    NotifyLifecycleStateChanged();
 }
 
 
@@ -1536,11 +1867,20 @@ void UbTransportChannel::SetUbTransport(uint32_t nodeId,
                                         Ipv4Address dip,         // Dest IP address
                                         Ptr<UbCongestionControl> congestionCtrl)
 {
+    Ptr<Node> node = NodeList::GetNode(nodeId);
+    Ptr<UbSwitch> sw = node->GetObject<UbSwitch>();
+    NS_ABORT_MSG_IF(sw == nullptr || sw->GetRoutingProcess() == nullptr,
+                    "RTP transport configuration requires an initialized UB routing process");
+    sw->GetRoutingProcess()->ValidateRoutingType(m_routingType, "RTP transport channel");
+
     m_nodeId = nodeId;
     m_src = src;
     m_dest = dest;
     m_tpn = srcTpn;
     m_dstTpn = dstTpn;
+    m_lifecycleOwner =
+        UbLifecycleCoordinator::GetOrCreate(NodeList::GetNode(m_nodeId))
+            ->OpenResource(UbLifecycleResourceKind::RTP_ENDPOINT, m_tpn);
     m_size = size;
     m_priority = priority;
     m_sport = sport;
@@ -1570,12 +1910,83 @@ UbTransportChannel::ParseReceivedDataPacket(Ptr<Packet> packet,
     packet->RemoveHeader(ctx.ipv4Header);
     packet->RemoveHeader(ctx.udpHeader);
     packet->RemoveHeader(ctx.transportHeader);
-    packet->RemoveHeader(ctx.transactionHeader);
-    packet->RemoveHeader(ctx.maExtHeader);
+    UbFullTaHeader base;
+    if (!DecodeFullTaBase(packet, base).IsSuccess())
+    {
+        return false;
+    }
+    const bool isResponse = base.isResponse;
+    ctx.ackTransactionHeader.reset();
+    ctx.transactionHeader = base.request;
+    if (isResponse)
+    {
+        ctx.ackTransactionHeader = base.response;
+        // Retain the original RTP common-field view while exposing the complete ATAH.
+        ctx.transactionHeader.SetUbTransactionOpcode(
+            static_cast<UbTransactionOpcode>(base.response.GetUbTransactionOpcode()));
+        ctx.transactionHeader.SetIniTaSsn(base.response.GetIniTaSsn());
+        ctx.transactionHeader.SetIniRcType(base.response.GetIniRcType());
+        ctx.transactionHeader.SetIniRcId(base.response.GetIniRcId());
+    }
+    // Consume exactly the header plan a sender of this rule and these wire flags must have written.
+    const auto transactionOpcode = static_cast<UbTransactionOpcode>(
+        ctx.transactionHeader.GetUbTransactionOpcode());
+    const auto* transactionRule = FindTransactionRule(transactionOpcode);
+    if (isResponse && transactionOpcode == UbTransactionOpcode::ATOMIC_RESPONSE)
+    {
+        // A response's extension layout belongs to its request rule. The shared ATOMIC_RESPONSE
+        // rule has no extension header, while Atomic_sync adds a TAIDETAH echo on top of it, so
+        // resolve the outstanding request exactly as the transaction layer later correlates it.
+        UbFlowTag responseFlowTag;
+        Ptr<UbController> controller =
+            NodeList::GetNode(m_nodeId) == nullptr
+                ? nullptr
+                : NodeList::GetNode(m_nodeId)->GetObject<UbController>();
+        Ptr<UbTransaction> transaction =
+            controller == nullptr ? nullptr : controller->GetUbTransaction();
+        if (transaction != nullptr && packet->PeekPacketTag(responseFlowTag))
+        {
+            const auto requestOpcode = transaction->FindOutstandingRequestOpcode(
+                ctx.transactionHeader.GetIniRcId(), responseFlowTag.GetFlowId());
+            if (requestOpcode.has_value())
+            {
+                if (const auto* requestRule = FindTransactionRule(*requestOpcode))
+                {
+                    transactionRule = requestRule;
+                }
+            }
+        }
+    }
+    UbTaHeaderPlan plan;
+    if (transactionRule != nullptr)
+    {
+        const UbTaHeaderPresence presence{ctx.transactionHeader.GetTvEn(),
+                                          ctx.transactionHeader.GetMtEn(),
+                                          ctx.transactionHeader.GetUdFlg()};
+        plan = isResponse ? UbTaHeaderPlan::ForResponse(*transactionRule)
+                          : UbTaHeaderPlan::ForRequest(*transactionRule, presence);
+    }
+    if (!DecodeFullTaExtensions(packet, plan, ctx.maExtHeader, ctx.transactionFields).IsSuccess())
+    {
+        return false;
+    }
     ctx.payloadBytes = packet->GetSize();
     ctx.resLenBytes = ctx.maExtHeader.GetLength();
+    UbExplicitPayloadTag explicitPayloadTag;
+    if (packet->PeekPacketTag(explicitPayloadTag))
+    {
+        Ptr<Packet> explicitPayload = packet->Copy();
+        explicitPayload->RemovePacketTag(explicitPayloadTag);
+        ctx.explicitPayload = explicitPayload;
+    }
     ctx.psn = UbTpPsnSequence::Unwrap(ctx.transportHeader.GetPsn(), m_psnRecvNxt);
     packet->PeekPacketTag(ctx.flowTag);
+    UbTransactionCorrelationTag correlationTag;
+    ctx.hasTransactionCorrelation = packet->PeekPacketTag(correlationTag);
+    if (ctx.hasTransactionCorrelation)
+    {
+        ctx.transactionCorrelation = correlationTag.GetIdentity();
+    }
     return true;
 }
 
@@ -1594,8 +2005,8 @@ UbTransportChannel::TraceReceivedDataPacket(const ReceivedDataPacketContext& ctx
         UbPacketTraceTag traceTag;
         UbFlowTag flowTag = ctx.flowTag;
         ctx.packet->PeekPacketTag(traceTag);
-        TpRecvNotify({ctx.packet->GetUid(), UbTpPsnSequence::ToWire(ctx.psn), m_dest, m_src, m_dstTpn, m_tpn,
-                     PacketType::PACKET, ctx.packet->GetSize(), flowTag.GetFlowId(), "", traceTag});
+        TpRecvNotify(ctx.packet->GetUid(), UbTpPsnSequence::ToWire(ctx.psn), m_dest, m_src, m_dstTpn, m_tpn,
+                     PacketType::PACKET, ctx.packet->GetSize(), flowTag.GetFlowId(), "", traceTag);
     }
 }
 
@@ -1605,9 +2016,15 @@ UbTransportChannel::BuildTransportResponsePacket(const ReceivedDataPacketContext
 {
     Ptr<Packet> responsePacket = Create<Packet>(0);
     responsePacket->AddPacketTag(ctx.flowTag);
+    if (ctx.hasTransactionCorrelation)
+    {
+        UbTransactionCorrelationTag correlationTag;
+        correlationTag.SetIdentity(ctx.transactionCorrelation);
+        responsePacket->AddPacketTag(correlationTag);
+    }
 
     UbAckTransactionHeader ackTaHeader;
-    ackTaHeader.SetTaOpcode(TaOpcode::TA_OPCODE_TRANSACTION_ACK);
+    ackTaHeader.SetUbTransactionOpcode(UbTransactionOpcode::TAACK);
     ackTaHeader.SetIniTaSsn(ctx.transactionHeader.GetIniTaSsn());
     ackTaHeader.SetIniRcId(ctx.transactionHeader.GetIniRcId());
 
@@ -1634,13 +2051,12 @@ UbTransportChannel::BuildTransportResponsePacket(const ReceivedDataPacketContext
                           ctx.ipv4Header.GetDestination(),
                           ctx.ipv4Header.GetSource());
     responsePacket->AddHeader(ctx.networkHeader);
-    UbDataLink::GenPacketHeader(responsePacket,
+    UbDataLink::AddPacketHeader(responsePacket,
                                 false,
                                 true,
                                 ctx.dataLinkHeader.GetCreditTargetVL(),
                                 ctx.dataLinkHeader.GetPacketVL(),
-                                0,
-                                1,
+                                ctx.dataLinkHeader.GetRoutingType(),
                                 UbDatalinkHeaderConfig::PACKET_IPV4);
     return responsePacket;
 }
@@ -1772,11 +2188,18 @@ UbTransportChannel::UpdateReceiveWindowAndCollectCompletedTa(
                                                    ctx.payloadBytes,
                                                    ctx.networkHeader);
     UbFlowTag flowTag = ctx.flowTag;
-    m_bufferedInboundPackets[ctx.psn] = {ctx.transportHeader,
-                                         ctx.transactionHeader,
-                                         ctx.resLenBytes,
-                                         ctx.payloadBytes,
-                                         flowTag.GetFlowId()};
+    m_bufferedInboundPackets[ctx.psn] = {
+        .tpHeader = ctx.transportHeader,
+        .taHeader = ctx.transactionHeader,
+        .resLenBytes = ctx.resLenBytes,
+        .remoteAddress = ctx.maExtHeader.GetVirtualAddress(),
+        .remoteTokenId = ctx.maExtHeader.GetTokenId(),
+        .payloadBytes = ctx.payloadBytes,
+        .taskId = flowTag.GetFlowId(),
+        .hasTransactionCorrelation = ctx.hasTransactionCorrelation,
+        .transactionCorrelation = ctx.transactionCorrelation,
+        .explicitPayload = ctx.explicitPayload,
+        .transactionFields = ctx.transactionFields};
     if (outOfOrderPacket) {
         NS_LOG_DEBUG("Out-of-Order Packet,tpn:{" << m_tpn << "} psn:{"
                      << ctx.psn << "} expectedPsn:{" << m_psnRecvNxt << "}");
@@ -1801,12 +2224,7 @@ UbTransportChannel::UpdateReceiveWindowAndCollectCompletedTa(
             break;
         }
 
-        Ptr<UbWqeSegment> completedTaUnit =
-            TrackInboundTaPacket(bufferedIt->second.tpHeader,
-                                 bufferedIt->second.taHeader,
-                                 bufferedIt->second.resLenBytes,
-                                 bufferedIt->second.payloadBytes,
-                                 bufferedIt->second.taskId);
+        Ptr<UbWqeSegment> completedTaUnit = TrackInboundTaPacket(bufferedIt->second);
         if (completedTaUnit != nullptr) {
             completedTaUnits.push_back(completedTaUnit);
         }
@@ -1921,55 +2339,10 @@ void UbTransportChannel::RecvDataPacket(Ptr<Packet> p)
     CompleteInboundTaUnits(completedTaUnits);
 }
 
-uint32_t
-UbTransportChannel::GetGbnRetransmissionProgressBytesFromPsn(uint64_t psn) const
-{
-    uint64_t retransmitBytes = 0;
-    for (const Ptr<UbWqeSegment>& segment : m_wqeSegmentVector) {
-        if (segment == nullptr) {
-            continue;
-        }
-        const uint64_t segmentStart = segment->GetPsnStart();
-        const uint64_t segmentEnd = segmentStart + segment->GetPsnSize();
-        const uint64_t overlapStart = std::max(psn, segmentStart);
-        const uint64_t overlapEnd = std::min(m_psnSndNxt, segmentEnd);
-        if (overlapStart >= overlapEnd) {
-            continue;
-        }
-        const uint64_t segmentBytes = GetTotalProgressBytes(segment);
-        const uint64_t startOffset =
-            std::min(segmentBytes, (overlapStart - segmentStart) * UB_MTU_BYTE);
-        const uint64_t endOffset =
-            std::min(segmentBytes, (overlapEnd - segmentStart) * UB_MTU_BYTE);
-        retransmitBytes += endOffset - startOffset;
-    }
-    return static_cast<uint32_t>(std::min<uint64_t>(retransmitBytes, UINT32_MAX));
-}
-
-void
-UbTransportChannel::ResetSegmentSendProgressFromPsn(uint64_t psn)
-{
-    for (size_t i = 0; i < m_wqeSegmentVector.size(); ++i) {
-        Ptr<UbWqeSegment> currentSegment = m_wqeSegmentVector[i];
-        const uint64_t segmentStart = currentSegment->GetPsnStart();
-        const uint64_t segmentEnd = segmentStart + currentSegment->GetPsnSize();
-        if (segmentEnd <= psn) {
-            continue;
-        }
-        if (segmentStart <= psn) {
-            const uint32_t resetSentBytes = (psn - segmentStart) * UB_MTU_BYTE;
-            currentSegment->ResetSentBytes(resetSentBytes);
-        } else {
-            currentSegment->ResetSentBytes();
-        }
-        NS_LOG_INFO("GBN fast retransmit,taskId: " << currentSegment->GetTaskId()
-                    << " psn: " << m_psnSndNxt);
-    }
-}
-
 void UbTransportChannel::ReTxTimeout()
 {
     const UbRetransTimeoutResult timeoutResult = m_retrans->OnTimeout();
+    m_congestionCtrl->OnSenderRetransmissionRollback(timeoutResult.retransmitBytes);
     if (timeoutResult.triggerTransmit) {
         TriggerTransportTransmit();
     }
@@ -1982,6 +2355,151 @@ void UbTransportChannel::ReTxTimeout()
 uint32_t UbTransportChannel::GetCurrentSqSize() const
 {
     return m_wqeSegmentVector.size();
+}
+
+bool
+UbTransportChannel::TryAdmitWqeSegment(Ptr<UbWqeSegment> segment)
+{
+    return m_isActive && TryContinueAcceptedWqeSegment(segment);
+}
+
+bool
+UbTransportChannel::TryContinueAcceptedWqeSegment(Ptr<UbWqeSegment> segment)
+{
+    if (!CanContinueAcceptedWqeSegment(segment))
+    {
+        return false;
+    }
+
+    segment->SetTpn(m_tpn);
+    segment->SetResolvedTpIdentity(m_lifecycleOwner);
+    segment->SetTpMsn(GetMsnCnt());
+    segment->SetPsnStart(GetPsnCnt());
+    UpdatePsnCnt(segment->GetPsnSize());
+    UpDateMsnCnt(1);
+    PushWqeSegment(segment);
+    return true;
+}
+
+bool
+UbTransportChannel::CanAdmitWqeSegment(Ptr<const UbWqeSegment> segment) const
+{
+    return m_isActive && CanContinueAcceptedWqeSegment(segment);
+}
+
+bool
+UbTransportChannel::CanContinueAcceptedWqeSegment(Ptr<const UbWqeSegment> segment) const
+{
+    return segment != nullptr && !IsWqeSegmentLimited() && CanScheduleAnotherSegment();
+}
+
+UbWqeSegmentTerminalDisposition
+UbTransportChannel::TryCancelUnsentWqeSegment(
+    Ptr<UbWqeSegment> segment,
+    const UbTransactionCorrelationIdentity& expectedCorrelation,
+    const UbLifecycleResourceIdentity& expectedTpIdentity)
+{
+    NS_ABORT_MSG_IF(segment == nullptr, "Cannot cancel a null admitted segment");
+    NS_ABORT_MSG_IF(expectedTpIdentity != m_lifecycleOwner ||
+                        !segment->HasResolvedTpIdentity() ||
+                        segment->GetResolvedTpIdentity() != expectedTpIdentity,
+                    "Admitted segment cancellation references the wrong TP generation");
+    NS_ABORT_MSG_IF(!segment->HasTransactionCorrelation() ||
+                        segment->GetTransactionCorrelation() != expectedCorrelation,
+                    "Admitted segment cancellation references the wrong Transaction generation");
+
+    const auto retained = std::find(m_wqeSegmentVector.begin(),
+                                    m_wqeSegmentVector.end(),
+                                    segment);
+    if (retained == m_wqeSegmentVector.end())
+    {
+        const uint64_t segmentEnd = segment->GetPsnStart() + segment->GetPsnSize();
+        NS_ABORT_MSG_IF(m_psnSndUna < segmentEnd,
+                        "Admitted segment disappeared before exact TP ACK cleanup");
+        return UbWqeSegmentTerminalDisposition::TRANSPORT_CLEANED;
+    }
+
+    if (segment->HasStartedSending() || m_psnSndNxt > segment->GetPsnStart())
+    {
+        if (IsRetransEnabled()) {
+            m_retrans->RetireSegmentDescriptors(
+                expectedCorrelation,
+                segment->GetPsnStart(),
+                segment->GetPsnStart() + segment->GetPsnSize());
+        }
+        return UbWqeSegmentTerminalDisposition::RETAINED;
+    }
+
+    uint64_t expectedPsnStart = segment->GetPsnStart();
+    uint64_t expectedTpMsn = segment->GetTpMsn();
+    for (auto suffix = retained; suffix != m_wqeSegmentVector.end(); ++suffix)
+    {
+        const Ptr<UbWqeSegment>& retainedSegment = *suffix;
+        if (retainedSegment == nullptr || retainedSegment->HasStartedSending() ||
+            retainedSegment->GetPsnStart() != expectedPsnStart ||
+            retainedSegment->GetTpMsn() != expectedTpMsn)
+        {
+            return UbWqeSegmentTerminalDisposition::RETAINED;
+        }
+        expectedPsnStart += retainedSegment->GetPsnSize();
+        ++expectedTpMsn;
+    }
+    if (expectedPsnStart != m_tpPsnCnt || expectedTpMsn != m_tpMsnCnt)
+    {
+        return UbWqeSegmentTerminalDisposition::RETAINED;
+    }
+
+    const uint32_t canceledPsnSize = segment->GetPsnSize();
+    for (auto suffix = std::next(retained); suffix != m_wqeSegmentVector.end(); ++suffix)
+    {
+        (*suffix)->SetPsnStart((*suffix)->GetPsnStart() - canceledPsnSize);
+        (*suffix)->SetTpMsn((*suffix)->GetTpMsn() - 1);
+    }
+    m_wqeSegmentVector.erase(retained);
+    m_tpPsnCnt -= canceledPsnSize;
+    --m_tpMsnCnt;
+    RefreshAllocatorSummary();
+    return UbWqeSegmentTerminalDisposition::CANCELED_UNSENT;
+}
+
+UbWqeSegmentTerminalDisposition
+UbTransportChannel::ForceRemoveRetainedWqeSegment(
+    Ptr<UbWqeSegment> segment,
+    const UbTransactionCorrelationIdentity& expectedCorrelation,
+    const UbLifecycleResourceIdentity& expectedTpIdentity)
+{
+    NS_ABORT_MSG_IF(segment == nullptr, "Cannot force-remove a null admitted segment");
+    NS_ABORT_MSG_IF(expectedTpIdentity != m_lifecycleOwner ||
+                        !segment->HasResolvedTpIdentity() ||
+                        segment->GetResolvedTpIdentity() != expectedTpIdentity,
+                    "Forced admitted-segment removal references the wrong TP generation");
+    NS_ABORT_MSG_IF(!segment->HasTransactionCorrelation() ||
+                        segment->GetTransactionCorrelation() != expectedCorrelation,
+                    "Forced admitted-segment removal references the wrong Transaction generation");
+
+    const auto retained = std::find(m_wqeSegmentVector.begin(),
+                                    m_wqeSegmentVector.end(),
+                                    segment);
+    if (retained == m_wqeSegmentVector.end())
+    {
+        const uint64_t segmentEnd = segment->GetPsnStart() + segment->GetPsnSize();
+        NS_ABORT_MSG_IF(m_psnSndUna < segmentEnd,
+                        "Forced segment removal lost unacknowledged TP work");
+        return UbWqeSegmentTerminalDisposition::TRANSPORT_CLEANED;
+    }
+    if (IsRetransEnabled()) {
+        m_retrans->RetireSegmentDescriptors(expectedCorrelation,
+                                            segment->GetPsnStart(),
+                                            segment->GetPsnStart() + segment->GetPsnSize());
+    }
+    m_wqeSegmentVector.erase(retained);
+    if (m_wqeSegmentVector.empty() && m_retrans != nullptr)
+    {
+        m_retrans->CancelTimer();
+        m_retrans->ClearRetainedState();
+    }
+    RefreshAllocatorSummary();
+    return UbWqeSegmentTerminalDisposition::FORCE_REMOVED;
 }
 
 uint32_t UbTransportChannel::GetActiveSendSegmentCount() const
@@ -2075,14 +2593,96 @@ Ptr<UbTransaction> UbTransportChannel::GetTransaction()
     return NodeList::GetNode(m_nodeId)->GetObject<UbController>()->GetUbTransaction();
 }
 
-void UbTransportChannel::ApplyNextWqeSegment()
+void UbTransportChannel::TryContinueJettyTransmission()
 {
-    GetTransaction()->ApplyScheduleWqeSegment(this);
+    if (m_ownerControllerDisposing)
+    {
+        return;
+    }
+    Ptr<Node> node = NodeList::GetNode(m_nodeId);
+    NS_ABORT_MSG_IF(node == nullptr, "TP capacity wake requires its owning Node");
+    Ptr<UbController> controller = node->GetObject<UbController>();
+    NS_ABORT_MSG_IF(controller == nullptr, "TP capacity wake requires its owning Controller");
+    if (controller->IsDisposing())
+    {
+        return;
+    }
+    Ptr<UbTransaction> transaction = controller->GetUbTransaction();
+    NS_ABORT_MSG_IF(transaction == nullptr,
+                    "TP capacity wake requires the Controller Transaction facade");
+    transaction->TryContinueJettyTransmission(this);
 }
 
 bool UbTransportChannel::IsEmpty()
 {
     return !HasPendingTransmitWork();
+}
+
+bool
+UbTransportChannel::IsSafeForExplicitDestroy() const
+{
+    return m_ackQ.empty() && m_cnpQ.empty() && m_wqeSegmentVector.empty() &&
+           m_remoteRequest.empty() && m_inboundTaUnits.empty() &&
+           m_bufferedInboundPackets.empty() && m_psnSndUna == m_psnSndNxt &&
+           (m_retrans == nullptr || !m_retrans->HasTimerRunning());
+}
+
+UbTransportQuiescenceSnapshot
+UbTransportChannel::GetQuiescenceSnapshot() const
+{
+    UbTransportQuiescenceSnapshot snapshot;
+    snapshot.pendingAckPackets = m_ackQ.size();
+    snapshot.pendingCnpPackets = m_cnpQ.size();
+    snapshot.pendingWqeSegments = m_wqeSegmentVector.size();
+    snapshot.pendingRemoteRequests = m_remoteRequest.size();
+    snapshot.pendingInboundTaUnits = m_inboundTaUnits.size();
+    snapshot.bufferedInboundPackets = m_bufferedInboundPackets.size();
+    snapshot.hasUnacknowledgedPsn = m_psnSndUna != m_psnSndNxt;
+    snapshot.retransmissionTimerRunning = m_retrans != nullptr && m_retrans->HasTimerRunning();
+    return snapshot;
+}
+
+void
+UbTransportChannel::AddInboundTaUnitForTest(uint32_t srcTpn, uint64_t msn)
+{
+    m_inboundTaUnits.emplace(std::make_pair(srcTpn, msn), InboundTaUnitState{});
+}
+
+void
+UbTransportChannel::AddBufferedInboundPacketForTest(uint64_t psn)
+{
+    m_bufferedInboundPackets.emplace(psn, BufferedInboundPacket{});
+}
+
+void
+UbTransportChannel::FreezeNewWork()
+{
+    m_isActive = false;
+    if (m_congestionCtrl != nullptr)
+    {
+        m_congestionCtrl->OnTpDestroyRequested();
+    }
+}
+
+void
+UbTransportChannel::PrepareForExplicitDestroy()
+{
+    m_lifecycleStateChangedCallback = {};
+}
+
+void
+UbTransportChannel::SetLifecycleStateChangedCallback(Callback<void, uint32_t> callback)
+{
+    m_lifecycleStateChangedCallback = callback;
+}
+
+void
+UbTransportChannel::NotifyLifecycleStateChanged()
+{
+    if (!m_lifecycleStateChangedCallback.IsNull())
+    {
+        m_lifecycleStateChangedCallback(m_tpn);
+    }
 }
 
 bool UbTransportChannel::HasPendingTransmitWork()
@@ -2091,6 +2691,9 @@ bool UbTransportChannel::HasPendingTransmitWork()
         return true;
     }
     if (!m_ackQ.empty()) {
+        return true;
+    }
+    if (IsRetransEnabled() && m_retrans->HasPendingGbnRetransmission()) {
         return true;
     }
     if (HasPendingSelectiveRetransmissionWork()) {
@@ -2108,6 +2711,14 @@ bool UbTransportChannel::IsLimited()
         return false;
     }
     if (!m_ackQ.empty()) {
+        return false;
+    }
+    if (IsRetransEnabled() && m_retrans->HasPendingGbnRetransmission()) {
+        if (m_congestionCtrl->IsCcLimited(
+                m_retrans->GetNextGbnRetransmissionProgressBytes())) {
+            m_sendWindowLimited = true;
+            return true;
+        }
         return false;
     }
     if (HasPendingSelectiveRetransmissionWork()) {
@@ -2169,9 +2780,13 @@ void UbTransportChannel::WqeSegmentCompletesNotify(uint32_t nodeId, uint32_t tas
     m_traceWqeSegmentCompletesNotify(nodeId, taskId, taSsn);
 }
 
-void UbTransportChannel::TpRecvNotify(UbTpRecvTraceData data)
+void UbTransportChannel::TpRecvNotify(uint32_t packetUid, uint32_t psn, uint32_t src, uint32_t dst,
+                                      uint32_t srcTpn, uint32_t dstTpn, PacketType type,
+                                      uint32_t size, uint32_t taskId, std::string ackInfo,
+                                      UbPacketTraceTag traceTag)
 {
-    m_tpRecvNotify(data);
+    m_tpRecvNotify({packetUid, psn, src, dst, srcTpn, dstTpn, type, size, taskId,
+                    std::move(ackInfo), traceTag});
 }
 
 // ==========================================================================
@@ -2193,6 +2808,206 @@ UbTransportGroup::UbTransportGroup()
 
 UbTransportGroup::~UbTransportGroup()
 {
+}
+
+void
+UbTransportGroup::Init(const UbLifecycleResourceIdentity& identity,
+                       const std::vector<UbTransportGroupMember>& members,
+                       uint32_t initialSelectionCursor)
+{
+    NS_ABORT_MSG_IF(identity.kind != UbLifecycleResourceKind::RTP_TPG || identity.generation == 0,
+                    "TPG requires a live lifecycle identity");
+    NS_ABORT_MSG_IF(members.empty(), "TPG requires at least one member");
+    m_identity = identity;
+    m_members = members;
+    m_selectionCursor = initialSelectionCursor % m_members.size();
+}
+
+const UbLifecycleResourceIdentity&
+UbTransportGroup::GetLifecycleIdentity() const
+{
+    return m_identity;
+}
+
+uint64_t
+UbTransportGroup::GetMembershipVersion() const
+{
+    return m_membershipVersion;
+}
+
+uint32_t
+UbTransportGroup::GetMemberCount() const
+{
+    return static_cast<uint32_t>(m_members.size());
+}
+
+uint32_t
+UbTransportGroup::GetSelectionCursor() const
+{
+    return m_selectionCursor;
+}
+
+uint32_t
+UbTransportGroup::GetMemberIndexAtOffset(uint32_t offset) const
+{
+    NS_ABORT_MSG_IF(m_members.empty(), "Cannot select from an empty TPG");
+    NS_ABORT_MSG_IF(offset >= m_members.size(), "TPG selection offset is out of range");
+    return (m_selectionCursor + offset) % m_members.size();
+}
+
+const UbTransportGroupMember&
+UbTransportGroup::GetMember(uint32_t index) const
+{
+    NS_ABORT_MSG_IF(index >= m_members.size(), "TPG member index is out of range");
+    return m_members[index];
+}
+
+bool
+UbTransportGroup::IsMemberSelectable(uint32_t index) const
+{
+    return GetMember(index).state == UbTransportGroupMemberState::ACTIVE;
+}
+
+int32_t
+UbTransportGroup::FindMemberIndex(const UbLifecycleResourceIdentity& tpIdentity) const
+{
+    for (uint32_t index = 0; index < m_members.size(); ++index)
+    {
+        if (m_members[index].tpIdentity == tpIdentity)
+        {
+            return static_cast<int32_t>(index);
+        }
+    }
+    return -1;
+}
+
+void
+UbTransportGroup::AddMember(const UbTransportGroupMember& member)
+{
+    NS_ABORT_MSG_IF(FindMemberIndex(member.tpIdentity) >= 0,
+                    "Cannot add the same TPG member twice");
+    m_members.push_back(member);
+    ++m_membershipVersion;
+}
+
+void
+UbTransportGroup::MarkMemberRetiring(uint32_t index)
+{
+    NS_ABORT_MSG_IF(index >= m_members.size(), "Cannot retire an unknown TPG member");
+    m_members[index].state = UbTransportGroupMemberState::RETIRING;
+    ++m_membershipVersion;
+}
+
+UbTransportGroupMember
+UbTransportGroup::RemoveMember(uint32_t index)
+{
+    NS_ABORT_MSG_IF(index >= m_members.size(), "Cannot remove an unknown TPG member");
+    UbTransportGroupMember removed = m_members[index];
+    m_members.erase(m_members.begin() + index);
+    if (m_members.empty())
+    {
+        m_selectionCursor = 0;
+    }
+    else if (index < m_selectionCursor)
+    {
+        --m_selectionCursor;
+    }
+    else if (m_selectionCursor >= m_members.size())
+    {
+        m_selectionCursor = 0;
+    }
+    ++m_membershipVersion;
+    return removed;
+}
+
+void
+UbTransportGroup::CommitSelection(uint32_t selectedIndex)
+{
+    NS_ABORT_MSG_IF(selectedIndex >= m_members.size(), "Cannot commit an unknown TPG member");
+    m_selectionCursor = (selectedIndex + 1) % m_members.size();
+}
+
+bool
+UbTransportGroup::IsAcceptingNewOperations() const
+{
+    return m_acceptingNewOperations;
+}
+
+void
+UbTransportGroup::FreezeNewOperations()
+{
+    if (m_acceptingNewOperations)
+    {
+        m_acceptingNewOperations = false;
+        ++m_membershipVersion;
+    }
+}
+
+void
+UbTransportGroup::ResumeNewOperations()
+{
+    if (!m_acceptingNewOperations)
+    {
+        m_acceptingNewOperations = true;
+        ++m_membershipVersion;
+    }
+}
+
+void
+UbTransportGroup::SetPendingLastMemberRemoval(
+    const UbLifecycleResourceIdentity& tpIdentity)
+{
+    NS_ABORT_MSG_IF(m_pendingLastMemberRemoval.has_value(),
+                    "TPG already has a pending last-member removal");
+    m_pendingLastMemberRemoval = tpIdentity;
+}
+
+bool
+UbTransportGroup::HasPendingLastMemberRemoval() const
+{
+    return m_pendingLastMemberRemoval.has_value();
+}
+
+const UbLifecycleResourceIdentity&
+UbTransportGroup::GetPendingLastMemberRemoval() const
+{
+    NS_ABORT_MSG_IF(!m_pendingLastMemberRemoval.has_value(),
+                    "TPG has no pending last-member removal");
+    return *m_pendingLastMemberRemoval;
+}
+
+void
+UbTransportGroup::ClearPendingLastMemberRemoval()
+{
+    m_pendingLastMemberRemoval.reset();
+}
+
+void
+UbTransportGroup::RequestDestroy(UbTpgCleanupMode mode)
+{
+    const bool changed =
+        !m_destroyRequested || static_cast<uint8_t>(mode) > static_cast<uint8_t>(m_cleanupMode);
+    m_destroyRequested = true;
+    if (static_cast<uint8_t>(mode) > static_cast<uint8_t>(m_cleanupMode))
+    {
+        m_cleanupMode = mode;
+    }
+    if (changed)
+    {
+        ++m_membershipVersion;
+    }
+}
+
+bool
+UbTransportGroup::IsDestroyPending() const
+{
+    return m_destroyRequested;
+}
+
+UbTpgCleanupMode
+UbTransportGroup::GetCleanupMode() const
+{
+    return m_cleanupMode;
 }
 
 } // namespace ns3

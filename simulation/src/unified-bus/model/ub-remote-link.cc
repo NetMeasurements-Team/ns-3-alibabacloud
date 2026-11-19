@@ -5,6 +5,7 @@
 #include "ns3/mpi-interface.h"
 #include "ns3/packet.h"
 #include "ns3/simulator.h"
+#include "ns3/ub-lifecycle.h"
 
 namespace ns3 {
 
@@ -39,12 +40,23 @@ UbRemoteLink::TransmitStart(Ptr<Packet> p, Ptr<UbPort> src, Time txTime)
     Ptr<UbPort> dst = GetDestination(src);
     if (!m_transmitObserver.IsNull())
     {
-        m_transmitObserver(p->Copy(), src, dst);
+        m_transmitObserver(CopyPacketView(p), src, dst);
     }
 
     Time rxTime = Simulator::Now() + txTime + GetDelay();
-    MpiInterface::SendPacket(p->Copy(), rxTime, dst->GetNode()->GetId(), dst->GetIfIndex());
+    MpiInterface::SendPacket(CopyPacketTransfer(p),
+                             rxTime,
+                             dst->GetNode()->GetId(),
+                             dst->GetIfIndex());
     return true;
+}
+
+bool
+UbRemoteLink::TransmitStart(Ptr<Packet> p, Ptr<UbPort> src, Time txTime, uint64_t attemptToken)
+{
+    NS_ABORT_MSG_IF(attemptToken != 0,
+                    "UbRemoteLink does not support reliable-rerouting attempts");
+    return TransmitStart(p, src, txTime);
 }
 
 bool

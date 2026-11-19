@@ -21,10 +21,14 @@ public:
     void HandleLoadTask();
     void HandleStoreTask();
     void UpdateTask(Ptr<UbLdstTaskSegment> taskSegment);
+    bool UpdateTaskForTest(Ptr<UbLdstTaskSegment> taskSegment);
     void SetLoadReqSize(uint32_t size);
     void SetStoreReqLength(uint32_t length);
     void SetLoadRspLength(uint32_t length);
+    std::pair<size_t, size_t> CancelPendingWork();
+    size_t GetWaitingAckCountForTest() const;
 private:
+    bool UpdateTaskRecord(Ptr<UbLdstTaskSegment> taskSegment);
     uint32_t CalcLength(uint32_t size);
     uint32_t m_nodeId;
     uint32_t m_threadId;

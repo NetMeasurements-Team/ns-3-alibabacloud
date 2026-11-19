@@ -386,14 +386,10 @@ void UbDatalinkPacketHeader::SetConfig(uint8_t config)
     m_config = config & 0xF; // Ensure 4 bits
 }
 
-void UbDatalinkPacketHeader::SetLoadBalanceMode(bool mode)
+void
+UbDatalinkPacketHeader::SetRoutingType(RoutingType routingType)
 {
-    m_loadBalanceMode = mode;
-}
-
-void UbDatalinkPacketHeader::SetRoutingPolicy(bool policy)
-{
-    m_routingPolicy = policy;
+    m_routingType = routingType;
 }
 
 // Getters
@@ -417,14 +413,10 @@ uint8_t UbDatalinkPacketHeader::GetPacketVL() const
     return m_packetVL;
 }
 
-bool UbDatalinkPacketHeader::GetLoadBalanceMode() const
+RoutingType
+UbDatalinkPacketHeader::GetRoutingType() const
 {
-    return m_loadBalanceMode;
-}
-
-bool UbDatalinkPacketHeader::GetRoutingPolicy() const
-{
-    return m_routingPolicy;
+    return m_routingType;
 }
 
 uint8_t UbDatalinkPacketHeader::GetConfig() const
@@ -456,8 +448,7 @@ void UbDatalinkPacketHeader::Print(std::ostream& os) const
           " creditTargetVL=" << static_cast<uint32_t>(m_creditTargetVL) <<
           " packetVL=" << static_cast<uint32_t>(m_packetVL) <<
           " config=" << static_cast<uint32_t>(m_config) <<
-          " loadBalanceMode=" << m_loadBalanceMode <<
-          " routingPolicy=" << m_routingPolicy;
+          " routingType=" << static_cast<uint32_t>(m_routingType);
 }
 
 uint32_t UbDatalinkPacketHeader::GetSerializedSize(void) const
@@ -476,10 +467,9 @@ void UbDatalinkPacketHeader::Serialize(Buffer::Iterator start) const
     uint8_t byte1 = ((m_packetVL & 0x7) << 5) | ((reservE2Value & 0x1) << 4) | (m_config & 0xF);
     start.WriteU8(byte1);
 
-    // 字节2: [Load Balance Mode:1][Routing Policy:1][Packet Length in block (ignored):4][Last Block
-    // Length高2位:2]
-    uint8_t byte2 = (m_loadBalanceMode ? 0x80 : 0) | (m_routingPolicy ? 0x40 : 0) |
-                    ((ignoredFieldValue & 0xF) << 2) | ((ignoredFieldValue & 0x3));
+    // 字节2: [RT:2][Packet Length in block (ignored):4][Last Block Length高2位:2]
+    uint8_t byte2 = (static_cast<uint8_t>(m_routingType) << 6) |
+                    ((ignoredFieldValue & 0xF) << 2) | (ignoredFieldValue & 0x3);
     start.WriteU8(byte2);
 
     // 字节3: [Last Block Length低3位:3][Tail Payload Length:5]
@@ -510,17 +500,16 @@ uint32_t UbDatalinkPacketHeader::Deserialize(Buffer::Iterator start)
 
     // 验证配置项
     if (config != uint8_t(UbDatalinkHeaderConfig::PACKET_IPV4) &&
-        config != uint8_t(UbDatalinkHeaderConfig::PACKET_UB_MEM)) {
+        config != uint8_t(UbDatalinkHeaderConfig::PACKET_UB_MEM) &&
+        config != uint8_t(UbDatalinkHeaderConfig::PACKET_CNA24)) {
         NS_LOG_WARN("Invalid config value in UbDatalinkPacketHeader: got "
                     << static_cast<uint32_t>(config));
     }
     m_config = config;
 
-    // 字节2: [Load Balance Mode:1][Routing Policy:1][Packet Length in block (ignored):4][Last Block
-    // Length高2位:2]
+    // 字节2: [RT:2][Packet Length in block (ignored):4][Last Block Length高2位:2]
     uint8_t byte2 = start.ReadU8();
-    m_loadBalanceMode = (byte2 & 0x80) != 0;
-    m_routingPolicy = (byte2 & 0x40) != 0;
+    m_routingType = static_cast<RoutingType>((byte2 >> 6) & 0x3);
     // 忽略的字段就不读取了
 
     // 字节3: [Last Block Length低3位:3][Tail Payload Length:5] - 完全忽略
@@ -1526,7 +1515,7 @@ TypeId UbTransactionHeader::GetInstanceTypeId(void) const
 void UbTransactionHeader::Print(std::ostream& os) const
 {
     os << "UbTransactionHeader: "
-       << "TaOpcode=0x" << std::hex << (uint32_t)m_taOpcode << " SrcTaSsn=" << std::dec
+       << "UbTransactionOpcode=0x" << std::hex << (uint32_t)m_taOpcode << " SrcTaSsn=" << std::dec
        << m_iniTaSsn << " Order=" << (uint32_t)m_order
        << " Exclusive=" << m_exclusive << " IniRcType=" << (uint32_t)m_iniRcIdType
        << " IniRcId(jetty num)=" << std::dec << m_iniRcIdId;
@@ -1539,7 +1528,7 @@ uint32_t UbTransactionHeader::GetSerializedSize(void) const
 
 void UbTransactionHeader::Serialize(Buffer::Iterator start) const
 {
-    // 字节0: [TaOpcode:8]
+    // 字节0: [UbTransactionOpcode:8]
     start.WriteU8(m_taOpcode);
 
     // 字节1: [TaVer(fixed 0x00):2][EE:2][TV_EN:1][POISON:1][reserved:1][UD_FLG:1]
@@ -1566,7 +1555,7 @@ void UbTransactionHeader::Serialize(Buffer::Iterator start) const
 
 uint32_t UbTransactionHeader::Deserialize(Buffer::Iterator start)
 {
-    // 字节0: [TaOpcode:8]
+    // 字节0: [UbTransactionOpcode:8]
     m_taOpcode = start.ReadU8();
 
     // 字节1: [TaVer(fixed 0x00):2][EE:2][TV_EN:1][POISON:1][reserved:1][UD_FLG:1]
@@ -1607,7 +1596,7 @@ uint32_t UbTransactionHeader::Deserialize(Buffer::Iterator start)
 }
 
 // Setters
-void UbTransactionHeader::SetTaOpcode(TaOpcode opcode)
+void UbTransactionHeader::SetUbTransactionOpcode(UbTransactionOpcode opcode)
 {
     m_taOpcode = static_cast<uint8_t>(opcode);
 }
@@ -1653,7 +1642,7 @@ void UbTransactionHeader::SetIniRcId(uint32_t jettyNum)
 }
 
 // Getters
-uint8_t UbTransactionHeader::GetTaOpcode() const
+uint8_t UbTransactionHeader::GetUbTransactionOpcode() const
 {
     return m_taOpcode;
 }
@@ -1902,7 +1891,10 @@ UbCnpExtTph::GetLocation() const
  * UbCna16NetworkHeader implementation
  ***************************************************
  */
-UbCna16NetworkHeader::UbCna16NetworkHeader() = default;
+UbCna16NetworkHeader::UbCna16NetworkHeader()
+    : m_ccFields{.raw13 = 0}
+{
+}
 UbCna16NetworkHeader::~UbCna16NetworkHeader() = default;
 
 TypeId UbCna16NetworkHeader::GetTypeId()
@@ -2164,7 +2156,10 @@ bool UbCna16NetworkHeader::IsValidMode() const
  * UbCna24NetworkHeader implementation
  ***************************************************
  */
-UbCna24NetworkHeader::UbCna24NetworkHeader() = default;
+UbCna24NetworkHeader::UbCna24NetworkHeader()
+    : m_ccFields{.raw13 = 0}
+{
+}
 UbCna24NetworkHeader::~UbCna24NetworkHeader() = default;
 
 TypeId UbCna24NetworkHeader::GetTypeId()
@@ -2773,9 +2768,9 @@ void UbAckTransactionHeader::Serialize(Buffer::Iterator start) const
     
     // 字节5-7: [Reserved:2][INI RC TYPE:2][INI RC ID:12]
     uint32_t bytes567 = 0;
-    bytes567 |= (m_reserved3 & 0x03) << 14;   // bits 15-14: Reserved
-    bytes567 |= (m_iniRcType & 0x03) << 12;   // bits 13-12: INI RC TYPE
-    bytes567 |= (m_iniRcId & 0x0FFF);         // bits 11-0: INI RC ID
+    bytes567 |= (m_reserved3 & 0x03) << 22;   // bits 23-22: Reserved
+    bytes567 |= (m_iniRcType & 0x03) << 20;   // bits 21-20: INI RC TYPE
+    bytes567 |= (m_iniRcId & 0xFFFFF);         // bits 19-0: INI RC ID
     
     // 写入3字节 (高位在前)
     i.WriteU8 ((bytes567 >> 16) & 0xFF);      // 字节5
@@ -2812,9 +2807,9 @@ uint32_t UbAckTransactionHeader::Deserialize(Buffer::Iterator start)
     bytes567 |= static_cast<uint32_t>(i.ReadU8 ()) << 8;   // 字节6
     bytes567 |= static_cast<uint32_t>(i.ReadU8 ());        // 字节7
     
-    m_reserved3 = (bytes567 >> 14) & 0x03;
-    m_iniRcType = (bytes567 >> 12) & 0x03;
-    m_iniRcId = bytes567 & 0x0FFF;
+    m_reserved3 = (bytes567 >> 22) & 0x03;
+    m_iniRcType = (bytes567 >> 20) & 0x03;
+    m_iniRcId = bytes567 & 0xFFFFF;
     
     return GetSerializedSize ();
 }
@@ -2825,12 +2820,12 @@ uint32_t UbAckTransactionHeader::GetSerializedSize(void) const
 }
 
 // Setters
-void UbAckTransactionHeader::SetTaOpcode(TaOpcode opcode)
+void UbAckTransactionHeader::SetUbTransactionOpcode(UbTransactionOpcode opcode)
 {
     m_taOpcode = static_cast<uint8_t>(opcode);
 }
 
-void UbAckTransactionHeader::SetTaOpcode(uint8_t opcode)
+void UbAckTransactionHeader::SetUbTransactionOpcode(uint8_t opcode)
 {
     m_taOpcode = opcode;
 }
@@ -2876,7 +2871,7 @@ void UbAckTransactionHeader::SetIniRcId(uint32_t id)
 }
 
 // Getters
-uint8_t UbAckTransactionHeader::GetTaOpcode() const
+uint8_t UbAckTransactionHeader::GetUbTransactionOpcode() const
 {
     return m_taOpcode;
 }
@@ -2925,8 +2920,8 @@ uint32_t UbAckTransactionHeader::GetIniRcId() const
 bool UbAckTransactionHeader::IsValidOpcode() const
 {
     // 根据注释，应该是0x11~0x13范围内的操作码
-    return (m_taOpcode >= static_cast<uint8_t>(TaOpcode::TA_OPCODE_TRANSACTION_ACK) &&
-            m_taOpcode <= static_cast<uint8_t>(TaOpcode::TA_OPCODE_ATOMIC_RESPONSE));
+    return (m_taOpcode >= static_cast<uint8_t>(UbTransactionOpcode::TAACK) &&
+            m_taOpcode <= static_cast<uint8_t>(UbTransactionOpcode::ATOMIC_RESPONSE));
 }
 
 bool UbAckTransactionHeader::IsValidRspStatus() const
@@ -3025,12 +3020,12 @@ uint32_t UbCompactAckTransactionHeader::GetSerializedSize(void) const
 }
 
 // Setters
-void UbCompactAckTransactionHeader::SetTaOpcode(TaOpcode opcode)
+void UbCompactAckTransactionHeader::SetUbTransactionOpcode(UbTransactionOpcode opcode)
 {
     m_taOpcode = static_cast<uint8_t>(opcode);
 }
 
-void UbCompactAckTransactionHeader::SetTaOpcode(uint8_t opcode)
+void UbCompactAckTransactionHeader::SetUbTransactionOpcode(uint8_t opcode)
 {
     m_taOpcode = opcode;
 }
@@ -3051,7 +3046,7 @@ void UbCompactAckTransactionHeader::SetIniTaSsn(uint16_t tassn)
 }
 
 // Getters
-uint8_t UbCompactAckTransactionHeader::GetTaOpcode() const
+uint8_t UbCompactAckTransactionHeader::GetUbTransactionOpcode() const
 {
     return m_taOpcode;
 }
@@ -3075,8 +3070,8 @@ uint16_t UbCompactAckTransactionHeader::GetIniTaSsn() const
 bool UbCompactAckTransactionHeader::IsValidOpcode() const
 {
     // 根据注释，应该是0x11~0x13范围内的操作码
-    return (m_taOpcode >= static_cast<uint8_t>(TaOpcode::TA_OPCODE_TRANSACTION_ACK) &&
-            m_taOpcode <= static_cast<uint8_t>(TaOpcode::TA_OPCODE_ATOMIC_RESPONSE));
+    return (m_taOpcode >= static_cast<uint8_t>(UbTransactionOpcode::TAACK) &&
+            m_taOpcode <= static_cast<uint8_t>(UbTransactionOpcode::ATOMIC_RESPONSE));
 }
 
 /*
@@ -3109,7 +3104,7 @@ TypeId UbCompactTransactionHeader::GetInstanceTypeId(void) const
 void UbCompactTransactionHeader::Print(std::ostream& os) const
 {
     os << "UbCompactTransactionHeader: "
-       << "TaOpcode=0x" << std::hex << (uint32_t)m_taOpcode << std::dec
+       << "UbTransactionOpcode=0x" << std::hex << (uint32_t)m_taOpcode << std::dec
        << " IniTaSsn=" << m_iniTaSsn;
 }
 
@@ -3120,7 +3115,7 @@ uint32_t UbCompactTransactionHeader::GetSerializedSize(void) const
 
 void UbCompactTransactionHeader::Serialize(Buffer::Iterator start) const
 {
-    // 字节0: [TaOpcode:8]
+    // 字节0: [UbTransactionOpcode:8]
     start.WriteU8(m_taOpcode);
 
     // 字节1: [TaVer(fixed 0x00):2][EE(ignore):2][TK_VLD(ignore):1][POISON(ignore):1][reserved:1][UDF_FLG(ignore):1]
@@ -3134,7 +3129,7 @@ void UbCompactTransactionHeader::Serialize(Buffer::Iterator start) const
 
 uint32_t UbCompactTransactionHeader::Deserialize(Buffer::Iterator start)
 {
-    // 字节0: [TaOpcode:8]
+    // 字节0: [UbTransactionOpcode:8]
     m_taOpcode = start.ReadU8();
 
     // 字节1: [TaVer(fixed 0x00):2][EE(ignore):2][TK_VLD(ignore):1][POISON(ignore):1][reserved:1][UDF_FLG(ignore):1]
@@ -3153,12 +3148,12 @@ uint32_t UbCompactTransactionHeader::Deserialize(Buffer::Iterator start)
 }
 
 // Setters
-void UbCompactTransactionHeader::SetTaOpcode(TaOpcode opcode)
+void UbCompactTransactionHeader::SetUbTransactionOpcode(UbTransactionOpcode opcode)
 {
     m_taOpcode = static_cast<uint8_t>(opcode);
 }
 
-void UbCompactTransactionHeader::SetTaOpcode(uint8_t opcode)
+void UbCompactTransactionHeader::SetUbTransactionOpcode(uint8_t opcode)
 {
     m_taOpcode = opcode;
 }
@@ -3169,7 +3164,7 @@ void UbCompactTransactionHeader::SetIniTaSsn(uint16_t taSsn)
 }
 
 // Getters
-uint8_t UbCompactTransactionHeader::GetTaOpcode() const
+uint8_t UbCompactTransactionHeader::GetUbTransactionOpcode() const
 {
     return m_taOpcode;
 }
@@ -3182,7 +3177,7 @@ uint16_t UbCompactTransactionHeader::GetIniTaSsn() const
 // 验证方法
 bool UbCompactTransactionHeader::IsValidOpcode() const
 {
-    return m_taOpcode < static_cast<uint8_t>(TaOpcode::TA_OPCODE_MAX);
+    return m_taOpcode < static_cast<uint8_t>(UbTransactionOpcode::MAX_OPCODE);
 }
 
 /*
@@ -3215,7 +3210,7 @@ TypeId UbDummyTransactionHeader::GetInstanceTypeId(void) const
 
 void UbDummyTransactionHeader::Print(std::ostream &os) const
 {
-    os << "UbDummyTransactionHeader: " << "TaOpcode=" <<
+    os << "UbDummyTransactionHeader: " << "UbTransactionOpcode=" <<
     static_cast<uint32_t>(m_taOpcode);
 }
 
@@ -3235,19 +3230,43 @@ uint32_t UbDummyTransactionHeader::GetSerializedSize(void) const
     return totalHeaderSize;
 }
 
-void UbDummyTransactionHeader::SetTaOpcode(TaOpcode opcode)
+void UbDummyTransactionHeader::SetUbTransactionOpcode(UbTransactionOpcode opcode)
 {
     m_taOpcode = static_cast<uint8_t>(opcode);
 }
 
-void UbDummyTransactionHeader::SetTaOpcode(uint8_t opcode)
+void UbDummyTransactionHeader::SetUbTransactionOpcode(uint8_t opcode)
 {
     m_taOpcode = opcode;
 }
 
-uint8_t UbDummyTransactionHeader::GetTaOpcode() const
+uint8_t UbDummyTransactionHeader::GetUbTransactionOpcode() const
 {
     return m_taOpcode;
 }
 
 } // namespace ns3
+
+namespace ns3
+{
+TypeId UbTransactionExtensionHeader::GetTypeId(){static TypeId tid=TypeId("ns3::UbTransactionExtensionHeader").SetParent<Header>().SetGroupName("UnifiedBus").AddConstructor<UbTransactionExtensionHeader>();return tid;}
+static uint32_t ExtSize(UbTransactionHeaderKind k,const std::vector<uint8_t>& raw){if(k==UbTransactionHeaderKind::INVALID)return 0;if(k==UbTransactionHeaderKind::IMMETAH)return 16;if(k==UbTransactionHeaderKind::NTFETAH)return 24;if(k==UbTransactionHeaderKind::BEETAH){if(raw.empty())return 8;for(uint32_t n:{8u,16u,32u,64u,128u})if(raw.size()==n)return n;return 0;}return 4;}
+bool UbTransactionExtensionHeader::IsValidLength() const { return GetSerializedSize()!=0; }
+uint32_t UbTransactionExtensionHeader::GetSerializedSize() const{return ExtSize(m_kind,m_raw);}
+void UbTransactionExtensionHeader::Serialize(Buffer::Iterator it) const{auto n=GetSerializedSize();std::vector<uint8_t>b=n?m_raw:std::vector<uint8_t>{};b.resize(n);for(uint32_t i=0;i<n;i++)it.WriteU8(b[i]);}
+uint32_t UbTransactionExtensionHeader::Deserialize(Buffer::Iterator it){m_raw.resize(ExtSize(m_kind,m_raw));for(auto&v:m_raw)v=it.ReadU8();return m_raw.size();}
+void UbTransactionExtensionHeader::Print(std::ostream&os)const{os<<"UbTransactionExtensionHeader(kind="<<static_cast<int>(m_kind)<<", bytes="<<m_raw.size()<<")";}
+static void Put(std::vector<uint8_t>&b,uint64_t v){for(int i=static_cast<int>(b.size())-1;i>=0;i--){b[i]=v&0xff;v>>=8;}}
+static uint64_t Get(const std::vector<uint8_t>&b,size_t off,size_t n){uint64_t v=0;for(size_t i=0;i<n&&off+i<b.size();i++)v=(v<<8)|b[off+i];return v;}
+void UbTransactionExtensionHeader::SetTokenValue(uint32_t v){m_raw.resize(4);Put(m_raw,v);}uint32_t UbTransactionExtensionHeader::GetTokenValue()const{return Get(m_raw,0,4);}
+void UbTransactionExtensionHeader::SetTaskId(uint16_t v){m_raw.resize(4);Put(m_raw,v);}uint16_t UbTransactionExtensionHeader::GetTaskId()const{return Get(m_raw,2,2);}
+void UbTransactionExtensionHeader::SetOffset(uint32_t v){m_raw.resize(4);Put(m_raw,v&0xffffff);}uint32_t UbTransactionExtensionHeader::GetOffset()const{return Get(m_raw,1,3);}
+void UbTransactionExtensionHeader::SetUserData(uint8_t t,uint8_t o,uint8_t off,uint8_t r){m_raw={t,o,off,r};}
+uint8_t UbTransactionExtensionHeader::GetUserDataType()const{return m_raw.size()>0?m_raw[0]:0;}
+uint8_t UbTransactionExtensionHeader::GetUserDataOpcode()const{return m_raw.size()>1?m_raw[1]:0;}
+uint8_t UbTransactionExtensionHeader::GetUserDataOffset()const{return m_raw.size()>2?m_raw[2]:0;}
+void UbTransactionExtensionHeader::SetTargetContext(uint8_t t,uint32_t id,uint8_t h){m_raw={h,static_cast<uint8_t>(static_cast<uint8_t>((t&3)<<4)|static_cast<uint8_t>((id>>16)&0xf)),static_cast<uint8_t>(id>>8),static_cast<uint8_t>(id)};}uint8_t UbTransactionExtensionHeader::GetTargetContextType()const{return m_raw.size()>1?(m_raw[1]>>4)&3:0;}uint32_t UbTransactionExtensionHeader::GetTargetContextId()const{return Get(m_raw,1,3)&0xfffff;}uint8_t UbTransactionExtensionHeader::GetHint()const{return m_raw.empty()?0:m_raw[0];}
+void UbTransactionExtensionHeader::SetImmediate(uint64_t d,uint32_t t,uint32_t l){m_raw.resize(16);for(int i=0;i<8;i++)m_raw[i]=(d>>(56-8*i))&255;m_raw[8]=t>>24;m_raw[9]=t>>16;m_raw[10]=t>>8;m_raw[11]=t;m_raw[12]=l>>24;m_raw[13]=l>>16;m_raw[14]=l>>8;m_raw[15]=l;}uint64_t UbTransactionExtensionHeader::GetImmediateData()const{return Get(m_raw,0,8);}uint32_t UbTransactionExtensionHeader::GetImmediateTokenValue()const{return Get(m_raw,8,4);}uint32_t UbTransactionExtensionHeader::GetMessageLength()const{return Get(m_raw,12,4);}
+void UbTransactionExtensionHeader::SetNotify(uint64_t a,uint32_t id,uint32_t t,uint64_t d){m_raw.resize(24);for(int i=0;i<8;i++)m_raw[i]=(a>>(56-8*i))&255;m_raw[8]=id>>16;m_raw[9]=id>>8;m_raw[10]=id;m_raw[11]=0;m_raw[12]=t>>24;m_raw[13]=t>>16;m_raw[14]=t>>8;m_raw[15]=t;for(int i=0;i<8;i++)m_raw[16+i]=(d>>(56-8*i))&255;}uint64_t UbTransactionExtensionHeader::GetNotifyAddress()const{return Get(m_raw,0,8);}uint32_t UbTransactionExtensionHeader::GetNotifyTokenId()const{return Get(m_raw,8,3);}uint32_t UbTransactionExtensionHeader::GetNotifyTokenValue()const{return Get(m_raw,12,4);}uint64_t UbTransactionExtensionHeader::GetNotifyData()const{return Get(m_raw,16,8);}
+void UbTransactionExtensionHeader::SetManagement(uint8_t c,uint8_t s,bool r,uint8_t st,uint16_t l){m_raw.resize(4);m_raw[0]=static_cast<uint8_t>((s&0xf)<<4)|static_cast<uint8_t>((c&7)<<1)|(r?1:0);m_raw[1]=st;m_raw[2]=static_cast<uint8_t>((l>>8)&0x0f);m_raw[3]=static_cast<uint8_t>(l);}UbManagementFields UbTransactionExtensionHeader::GetManagement()const{UbManagementFields f;if(m_raw.size()>=4){f.code=(m_raw[0]>>1)&7;f.subCode=(m_raw[0]>>4)&15;f.response=(m_raw[0]&1)!=0;f.status=m_raw[1];f.pduLength=static_cast<uint16_t>(((m_raw[2]&0x0f)<<8)|m_raw[3]);}return f;}
+}

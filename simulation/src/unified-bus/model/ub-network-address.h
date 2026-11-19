@@ -2,6 +2,7 @@
 #ifndef UB_NETWORK_ADDRESS_H
 #define UB_NETWORK_ADDRESS_H
 
+#include <cstdint>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
@@ -15,6 +16,11 @@ using namespace ns3;
 
 namespace utils {
 
+// CTP uses the existing WQE/segment sport and dport fields.  UINT8_MAX is
+// reserved for a wildcard; CNA16 can encode only port ids 0 through 14.
+constexpr uint8_t CTP_WILDCARD_PORT = UINT8_MAX;
+constexpr uint32_t CTP_MAX_CNA16_PORT_ID = 14;
+
 // brief
 struct TrafficRecord
 {
@@ -27,10 +33,12 @@ struct TrafficRecord
     string delay;
     int phaseId;
     vector<uint32_t> dependOnPhases;
-    uint32_t srcEntityId = 0;
-    uint32_t dstEntityId = 0;
-    bool hasSrcEntityId{false};
-    bool hasDstEntityId{false};
+    uint32_t srcPortId = 0;
+    uint32_t dstPortId = 0;
+    bool hasSrcPortId{false};
+    bool hasDstPortId{false};
+    std::string atomicSubOperation;
+    std::string requestPayloadBytes;
 };
 
 // Lightweight CSV row view. string_view fields are valid only during the parser callback.
@@ -45,10 +53,12 @@ struct TrafficRecordView
     std::string_view delay{};
     uint32_t phaseId{0};
     std::string_view dependOnPhases{};
-    uint32_t srcEntityId{0};
-    uint32_t dstEntityId{0};
-    bool hasSrcEntityId{false};
-    bool hasDstEntityId{false};
+    uint32_t srcPortId{0};
+    uint32_t dstPortId{0};
+    bool hasSrcPortId{false};
+    bool hasDstPortId{false};
+    std::string_view atomicSubOperation{};
+    std::string_view requestPayloadBytes{};
 };
 
 constexpr long DEFAULT_PORT_BUFFER_SIZE = 2097152;
@@ -130,6 +140,13 @@ inline Ipv4Address Cna16ToIp(uint32_t cnaAddr)
     // Convert CNA to NodeId, then NodeId to IP
     uint32_t node_id = Cna16ToNodeId(cnaAddr);
     return NodeIdToIp(node_id);
+}
+
+inline Ipv4Address Cna16ToEndpointIp(uint32_t cnaAddr)
+{
+    const uint32_t nodeId = Cna16ToNodeId(cnaAddr);
+    return (cnaAddr & 0xF) == 0 ? NodeIdToIp(nodeId)
+                                : NodeIdToIp(nodeId, Cna16ToPortId(cnaAddr));
 }
 
 inline uint32_t IpToCna16(Ipv4Address ip)

@@ -106,15 +106,18 @@ void UbLdstThread::PushTaskSegment(Ptr<UbLdstTaskSegment> taskSegment)
         NS_ASSERT_MSG(0, "task type is wrong");
     }
     auto taskSegmentId = taskSegment->GetTaskSegmentId();
-    m_waitingAckNum[taskSegmentId] = taskSegment->GetPsnSize();
+    NS_ABORT_MSG_IF(!m_waitingAckNum.emplace(taskSegmentId, taskSegment->GetPsnSize()).second,
+                    "Duplicate LDST ACK record");
     NS_LOG_DEBUG("[UbLdstThread PushTaskSegment] m_waitingAckNum[" << taskSegmentId << "]: " <<
                  m_waitingAckNum[taskSegmentId]);
     if (taskSegment->GetType() == UbMemOperationType::LOAD) {
         m_loadQueue.push(taskSegment);
-        Simulator::ScheduleNow(&UbLdstThread::HandleLoadTask, this);
+        auto ldstInstance = NodeList::GetNode(m_nodeId)->GetObject<UbLdstInstance>();
+        ldstInstance->ScheduleNow(&UbLdstThread::HandleLoadTask, this);
     } else if (taskSegment->GetType() == UbMemOperationType::STORE) {
         m_storeQueue.push(taskSegment);
-        Simulator::ScheduleNow(&UbLdstThread::HandleStoreTask, this);
+        auto ldstInstance = NodeList::GetNode(m_nodeId)->GetObject<UbLdstInstance>();
+        ldstInstance->ScheduleNow(&UbLdstThread::HandleStoreTask, this);
     }
 }
 
@@ -178,20 +181,57 @@ void UbLdstThread::SetThreadId(uint32_t threadId)
 
 void UbLdstThread::UpdateTask(Ptr<UbLdstTaskSegment> taskSegment)
 {
+    UpdateTaskRecord(taskSegment);
+}
+
+bool UbLdstThread::UpdateTaskForTest(Ptr<UbLdstTaskSegment> taskSegment)
+{
+    return UpdateTaskRecord(taskSegment);
+}
+
+bool UbLdstThread::UpdateTaskRecord(Ptr<UbLdstTaskSegment> taskSegment)
+{
     auto taskSegmentId = taskSegment->GetTaskSegmentId();
-    m_waitingAckNum[taskSegmentId]--;
-    NS_LOG_DEBUG("[UbLdstThread UpdateTask] m_waitingAckNum[" << taskSegmentId << "]"
-                 << m_waitingAckNum[taskSegmentId]);
-    if (m_waitingAckNum[taskSegmentId] == 0) {
-        auto ldstInstance = NodeList::GetNode(m_nodeId)->GetObject<UbLdstInstance>();
-        ldstInstance->OnTaskSegmentCompleted(taskSegment->GetTaskId());
+    auto waitingAck = m_waitingAckNum.find(taskSegmentId);
+    if (waitingAck == m_waitingAckNum.end() || waitingAck->second == 0) {
+        NS_LOG_WARN("Ignoring unknown, duplicate, or stale LDST ACK record " << taskSegmentId);
+        return false;
     }
+    waitingAck->second--;
+    NS_LOG_DEBUG("[UbLdstThread UpdateTask] m_waitingAckNum[" << taskSegmentId << "]"
+                 << waitingAck->second);
+    if (waitingAck->second == 0) {
+        m_waitingAckNum.erase(waitingAck);
+        auto ldstInstance = NodeList::GetNode(m_nodeId)->GetObject<UbLdstInstance>();
+        ldstInstance->OnTaskSegmentCompleted(taskSegment);
+    }
+    auto ldstInstance = NodeList::GetNode(m_nodeId)->GetObject<UbLdstInstance>();
     if (taskSegment->GetType() == UbMemOperationType::LOAD) {
         m_loadOutstanding++;
-        Simulator::ScheduleNow(&UbLdstThread::HandleLoadTask, this);
+        ldstInstance->ScheduleNow(&UbLdstThread::HandleLoadTask, this);
     } else if (taskSegment->GetType() == UbMemOperationType::STORE) {
         m_storeOutstanding++;
-        Simulator::ScheduleNow(&UbLdstThread::HandleStoreTask, this);
+        ldstInstance->ScheduleNow(&UbLdstThread::HandleStoreTask, this);
     }
+    return true;
+}
+
+std::pair<size_t, size_t> UbLdstThread::CancelPendingWork()
+{
+    const size_t waitingAcks = m_waitingAckNum.size();
+    const size_t queuedSegments = m_loadQueue.size() + m_storeQueue.size();
+    m_waitingAckNum.clear();
+    while (!m_loadQueue.empty()) {
+        m_loadQueue.pop();
+    }
+    while (!m_storeQueue.empty()) {
+        m_storeQueue.pop();
+    }
+    return {waitingAcks, queuedSegments};
+}
+
+size_t UbLdstThread::GetWaitingAckCountForTest() const
+{
+    return m_waitingAckNum.size();
 }
 } // namespace ns3

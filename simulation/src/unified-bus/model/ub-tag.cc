@@ -8,5 +8,6 @@ namespace ns3
 
 NS_OBJECT_ENSURE_REGISTERED(UbPacketTraceTag);
 NS_OBJECT_ENSURE_REGISTERED(UbFlowTag);
+NS_OBJECT_ENSURE_REGISTERED(UbExplicitPayloadTag);
 
 } // namespace ns3

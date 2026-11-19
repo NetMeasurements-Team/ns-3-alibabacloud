@@ -6,6 +6,8 @@
 #include "ns3/object.h"
 #include "ns3/packet.h"
 #include "ns3/simulator.h"
+#include "ns3/callback.h"
+#include "ns3/ub-ingress-queue.h"
 #include "ns3/ub-small-fifo-queue.h"
 #include "ns3/nstime.h"
 #include "ub-datatype.h"
@@ -26,12 +28,6 @@ constexpr uint32_t DEFAULT_DYNAMIC_PFC_RESUME_GAP_BYTES = 4 * 1024;
 constexpr uint32_t DEFAULT_PAPER_DYNAMIC_PFC_BETA = 8;
 constexpr uint32_t DEFAULT_PAPER_DYNAMIC_PFC_PRIORITY_COUNT = 8;
 
-enum class IngressQueueType {
-    VOQ,        // Virtual Output Queue - 转发数据包队列
-    TP,         // Transport Channel - 传输层可靠通道
-    BASE        // 基类默认值 - 不应出现在运行时
-};
-
 struct UbIngressQueueOccupancy {
     uint64_t total_bytes {0};
     uint64_t shared_bytes {0};
@@ -47,74 +43,13 @@ struct UbIngressPortOccupancy {
 struct UbSwitchBufferOccupancy {
     uint64_t shared_pool_used_bytes {0};
     uint64_t total_buffered_bytes {0};
+    uint64_t recovery_voq_bytes {0};
 };
 
 struct UbBufferProfileView {
     uint64_t reserve_per_queue_bytes {0};
     uint64_t shared_pool_bytes {0};
     uint64_t headroom_per_port_bytes {0};
-};
-
-/**
- * @brief port的收包缓存队列
- */
-class UbIngressQueue : public Object {
-public:
-    UbIngressQueue();
-    virtual ~UbIngressQueue();
-    static TypeId GetTypeId(void);
-    
-    virtual IngressQueueType GetIngressQueueType()
-    {
-        return IngressQueueType::BASE;
-    }
-
-    virtual bool IsEmpty();
-    virtual bool IsLimited() { return false; }
-    virtual Ptr<Packet> GetNextPacket();
-    virtual uint32_t GetNextPacketSize();
-    void SetInPortId(uint32_t inPortId) { m_inPortId = inPortId; }
-    void SetIngressPriority(uint32_t priority) { m_ingressPriority = priority; }
-    void SetOutPortId(uint32_t outPortId) { m_outPortId = outPortId; }
-    uint32_t GetInPortId() { return m_inPortId; }
-    uint32_t GetIngressPriority() { return m_ingressPriority; }
-    uint32_t GetOutPortId() { return m_outPortId; }
-    Time GetHeadArrivalTime() { return m_headArrivalTime; }
-    bool IsControlFrame();
-    bool IsForwardedDataPacket();
-    bool IsGeneratedDataPacket();
-
-protected:
-    Time m_headArrivalTime = Seconds(0);
-
-private:
-    uint32_t m_ingressPriority;
-    uint32_t m_inPortId;
-    uint32_t m_outPortId;
-};
-
-/**
- * @brief VOQ (Virtual Output Queue) implementation of ingress queue
- */
-class UbPacketQueue final : public UbIngressQueue {
-public:
-    UbPacketQueue();
-    ~UbPacketQueue() final;
-    static TypeId GetTypeId(void);
-
-    bool IsEmpty() override;
-    Ptr<Packet> GetNextPacket() override;
-    Ptr<Packet> Front();
-    void Pop();
-    void Push(Ptr<Packet> p);
-    IngressQueueType GetIngressQueueType() override;
-    uint32_t GetNextPacketSize() override;
-
-private:
-    Ptr<Packet> m_frontPacket;
-    UbSmallFifoQueue<Ptr<Packet>, 1> m_overflowQueue;
-    size_t m_packetCount = 0;
-    IngressQueueType m_ingressQueueType = IngressQueueType::VOQ;
 };
 
 /**
@@ -181,15 +116,60 @@ public:
     /**
      * @brief 包进入VOQ时调用（同时更新双视图）
      */
-    void PushToVoq(uint32_t inPort, uint32_t outPort, uint32_t priority, uint32_t pSize);
+    void PushToVoq(uint32_t inPort, uint32_t outPort, uint32_t priority, uint32_t pSize,
+                     bool recovery = false);
     
     /**
      * @brief 包离开VOQ时调用（同时更新双视图）
      */
-    void PopFromVoq(uint32_t inPort, uint32_t outPort, uint32_t priority, uint32_t pSize);
+    void PopFromVoq(uint32_t inPort, uint32_t outPort, uint32_t priority, uint32_t pSize,
+                     bool recovery = false);
     void PushToInPortProcessing(uint32_t inPort, uint32_t outPort, uint32_t priority, uint32_t pSize);
     void MoveInPortProcessingToVoq(uint32_t inPort, uint32_t outPort, uint32_t priority, uint32_t pSize);
-    
+
+    // ========== Detected-failure recovery transfer ==========
+
+    /**
+     * @brief Move one buffered VOQ packet to a different output association.
+     *
+     * The ingress reservation is unchanged; only the out-port views move. Used when a packet
+     * already owns ingress admission and its output association changes.
+     */
+    void MoveVoqOutputAssociation(uint32_t inPort,
+                                  uint32_t oldOutPort,
+                                  uint32_t newOutPort,
+                                  uint32_t priority,
+                                  uint32_t pSize);
+
+    /** Move one in-port-processing packet into recovery storage, keeping its reservation. */
+    void MoveProcessingToPendingRecovery(uint32_t inPort,
+                                         uint32_t outPort,
+                                         uint32_t priority,
+                                         uint32_t pSize);
+
+    /** Move one VOQ packet into recovery storage, keeping its ingress reservation. */
+    void MoveVoqToPendingRecovery(uint32_t inPort,
+                                  uint32_t outPort,
+                                  uint32_t priority,
+                                  uint32_t pSize);
+
+    /** Record one egress/retry packet that is retained without ingress admission. */
+    void AddPendingRecoveryBytes(uint32_t inPort, uint32_t priority, uint32_t pSize);
+
+    /** Admit a retained packet into a healthy VOQ, preserving ingress or using independent recovery storage. */
+    void AdmitPendingRecoveryToVoq(uint32_t inPort,
+                                   uint32_t newOutPort,
+                                   uint32_t priority,
+                                   uint32_t pSize,
+                                   bool ingressHeld);
+
+    /** Release retained recovery storage for a packet that is disposed instead of rerouted. */
+    void RemovePendingRecoveryBytes(uint32_t inPort, uint32_t priority, uint32_t pSize,
+                                    bool ingressHeld);
+
+    uint64_t GetPendingRecoveryBytes() const { return m_totalPendingRecoveryBytes; }
+    uint64_t GetQueuePendingRecoveryBytes(uint32_t inPort, uint32_t priority) const;
+
     // ========== 查询接口：InPort视图（用于流控） ==========
     
     /** InPort视图：某(inPort, priority)的 reserve+shared 占用（不含headroom） */
@@ -203,8 +183,14 @@ public:
     /** OutPort视图：某(outPort, priority)的buffer占用 */
     uint64_t GetOutPortBufferUsed(uint32_t outPort, uint32_t priority);
     
-    /** OutPort视图：某outPort所有优先级的总buffer占用 */
+    /** Legacy out-port view: processing + VOQ bytes, excluding egress. */
     uint64_t GetTotalOutPortBufferUsed(uint32_t outPort) const;
+
+    /** Buffer Occupancy: processing + VOQ + egress queued bytes for one out port. */
+    uint64_t GetOutPortBufferOccupancyBytes(uint32_t outPort) const;
+
+    /** Queue Backlog: VOQ + egress queued bytes, excluding fixed processing latency. */
+    uint64_t GetOutPortQueueBacklogBytes(uint32_t outPort) const;
     
     uint32_t GetReservePerQueueBytes() const { return m_reservePerQueueBytes; }
     void SetReservePerQueueBytes(uint32_t size);
@@ -235,9 +221,11 @@ private:
     uint64_t GetIngressAdmissionThresholdBytes(uint32_t inPort, uint32_t priority) const;
     uint64_t GetDynamicPauseThresholdBytes() const;
     uint64_t GetDynamicResumeThresholdBytes() const;
+    uint64_t GetPaperBufferedBytes() const;
     uint64_t GetPaperPauseThresholdBytes(uint64_t totalBufferedBytes) const;
     uint64_t GetPaperResumeThresholdBytes(uint64_t totalBufferedBytes) const;
     uint64_t GetSwitchTotalBufferedBytes() const;
+    uint64_t GetOutPortEgressBytes(uint32_t outPort) const;
     void UpdateIngressAdmission(uint32_t inPort, uint32_t priority, uint32_t pSize);
     void RemoveFromIngressAdmission(uint32_t inPort, uint32_t priority, uint32_t pSize);
 
@@ -251,6 +239,10 @@ private:
     DarrayU64 m_inPortProcessingBytes;   // [inPort][priority]
     DarrayU64 m_outPortProcessingBytes;  // [outPort][priority]
     uint64_t m_totalProcessingBytes {0};
+    DarrayU64 m_pendingRecoveryBytes;    // [inPort][priority]
+    uint64_t m_totalPendingRecoveryBytes {0};
+    // Pending subset that still owns its original ingress reservation.
+    uint64_t m_pendingRecoveryIngressBytes {0};
 
     // 三层 buffer 状态
     uint64_t m_sharedPoolBytes {DEFAULT_SHARED_POOL_BYTES};
@@ -263,6 +255,7 @@ private:
     uint64_t m_totalReservedBytes {0};
     uint64_t m_sharedUsedBytes {0};
     uint64_t m_totalVoqBufferedBytes {0};
+    uint64_t m_recoveryVoqBytes {0};
     uint64_t m_totalEgressBufferedBytes {0};
     std::vector<uint64_t> m_totalOutPortVoqBufferedBytes;
     DarrayU64 m_hdrmBytes;    // [inPort][priority] headroom usage

@@ -71,6 +71,20 @@ class UbSlidingBitmapWindow
         return advanced;
     }
 
+    [[nodiscard]] std::vector<uint64_t> GetMarkedSequences() const
+    {
+        std::vector<uint64_t> sequences;
+        for (uint64_t sequence : m_slots)
+        {
+            if (sequence != kInvalidSequence)
+            {
+                sequences.push_back(sequence);
+            }
+        }
+        std::sort(sequences.begin(), sequences.end());
+        return sequences;
+    }
+
   private:
     static constexpr uint64_t kInvalidSequence = std::numeric_limits<uint64_t>::max();
 

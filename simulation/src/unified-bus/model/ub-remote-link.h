@@ -20,6 +20,15 @@ class UbRemoteLink : public UbLink
 
     bool TransmitStart(Ptr<Packet> p, Ptr<UbPort> src, Time txTime) override;
 
+    /**
+     * @brief Reject a packet-level reliable-rerouting attempt.
+     *
+     * Packet-level reliable rerouting needs one shared event queue for detection, LastAck and
+     * retained-work migration. A remote link forwards through MpiInterface, so it cannot carry an
+     * attempt token. Reject the token instead of silently taking the in-process base-class path.
+     */
+    bool TransmitStart(Ptr<Packet> p, Ptr<UbPort> src, Time txTime, uint64_t attemptToken) override;
+
     bool IsRemote(void) const override;
 
     void SetTransmitObserver(TransmitObserver observer);

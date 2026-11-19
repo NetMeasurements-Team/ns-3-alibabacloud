@@ -21,6 +21,7 @@
 #include "ns3/ub-queue-manager.h"
 #include "ns3/ub-retrans.h"
 #include "ns3/ub-tag.h"
+#include "ns3/ub-lifecycle.h"
 namespace ns3 {
 
 class UbFunction;
@@ -31,7 +32,10 @@ class UbWqe;
 class UbWqeSegment;
 class UbJetty;
 
-struct UbTpRecvTraceData {
+// ns-3.36's Callback supports at most nine arguments, so the wide TP receive
+// trace is carried through a struct instead of eleven separate arguments.
+struct UbTpRecvTraceData
+{
     uint32_t packetUid;
     uint32_t psn;
     uint32_t src;
@@ -43,6 +47,55 @@ struct UbTpRecvTraceData {
     uint32_t taskId;
     std::string ackInfo;
     UbPacketTraceTag traceTag;
+};
+
+struct UbTransportQuiescenceSnapshot
+{
+    uint64_t pendingAckPackets{0};
+    uint64_t pendingCnpPackets{0};
+    uint64_t pendingWqeSegments{0};
+    uint64_t pendingRemoteRequests{0};
+    uint64_t pendingInboundTaUnits{0};
+    uint64_t bufferedInboundPackets{0};
+    bool hasUnacknowledgedPsn{false};
+    bool retransmissionTimerRunning{false};
+};
+
+enum class UbTpgMemberMutationStatus : uint8_t
+{
+    REMOVED = 0,
+    PENDING = 1,
+    NOT_FOUND = 2,
+    REJECTED = 3,
+    ADDED = 4,
+};
+
+enum class UbTransportGroupMemberState : uint8_t
+{
+    ACTIVE = 0,
+    RETIRING = 1,
+};
+
+enum class UbTpgCleanupMode : uint8_t
+{
+    GRACEFUL = 0,
+    ABORT = 1,
+    FORCE = 2,
+};
+
+struct UbTransportGroupMember
+{
+    uint32_t tpn{UINT32_MAX};
+    UbLifecycleResourceIdentity tpIdentity;
+    UbTransportGroupMemberState state{UbTransportGroupMemberState::ACTIVE};
+};
+
+enum class UbWqeSegmentTerminalDisposition : uint8_t
+{
+    CANCELED_UNSENT,
+    RETAINED,
+    TRANSPORT_CLEANED,
+    FORCE_REMOVED,
 };
 
 const uint32_t UB_TP_PSN_OOO_THRESHOLD = 2048;   // Jetty分段乱序阈值（用于乱序缓存等）
@@ -106,6 +159,11 @@ public:
     uint32_t GetNextPacketSize() override;
     bool IsEmpty() override;
     bool IsLimited() override;
+    bool IsSafeForExplicitDestroy() const;
+    UbTransportQuiescenceSnapshot GetQuiescenceSnapshot() const;
+    void FreezeNewWork();
+    void PrepareForExplicitDestroy();
+    void SetLifecycleStateChangedCallback(Callback<void, uint32_t> callback);
 
     Ptr<Packet> GenDataPacket(Ptr<UbWqeSegment> wqeSegment,
                               uint32_t payloadSize,
@@ -141,9 +199,47 @@ public:
     void RecvDataPacket(Ptr<Packet> p);
 
     /**
-     * @brief apply ta for next wqesegment
+     * Decoded content of one received RTP data packet.
+     *
+     * It exposes the transaction header view a carrier produced after consuming the rule-driven
+     * header plan, so wire-format tests can assert header order, payload integrity, and decoded
+     * field presence without reaching into the channel.
      */
-    void ApplyNextWqeSegment();
+    struct ReceivedDataPacketContext
+    {
+        Ptr<Packet> packet;
+        UbDatalinkPacketHeader dataLinkHeader;
+        UbIpBasedNetworkHeader networkHeader;
+        Ipv4Header ipv4Header;
+        UdpHeader udpHeader;
+        UbTransportHeader transportHeader;
+        UbTransactionHeader transactionHeader;
+        std::optional<UbAckTransactionHeader> ackTransactionHeader;
+        UbMAExtTah maExtHeader;
+        UbFlowTag flowTag;
+        bool hasTransactionCorrelation{false};
+        UbTransactionCorrelationIdentity transactionCorrelation;
+        uint64_t psn{0};
+        uint32_t payloadBytes{0};
+        uint32_t resLenBytes{0};
+        Ptr<const Packet> explicitPayload;
+        UbTransactionFields transactionFields;
+    };
+
+    /** Decode-only seam for wire-format tests; it has no side effects on the channel. */
+    bool ParseReceivedDataPacketForTest(Ptr<Packet> packet, ReceivedDataPacketContext& ctx)
+    {
+        return ParseReceivedDataPacket(packet, ctx);
+    }
+
+    /**
+     * @brief Ask the transaction owner to continue RTP WQE transmission after TP capacity changes.
+     */
+    void TryContinueJettyTransmission();
+    void MarkOwnerControllerDisposing()
+    {
+        m_ownerControllerDisposing = true;
+    }
 
     void WqeSegmentTriggerPortTransmit(Ptr<UbWqeSegment> segment);
 
@@ -181,6 +277,11 @@ public:
      * @return TP Number
      */
     uint32_t GetTpn() const { return m_tpn; }
+
+    const UbLifecycleResourceIdentity& GetLifecycleOwner() const
+    {
+        return m_lifecycleOwner;
+    }
 
     /**
      * @brief Get the destination transport path number.
@@ -276,20 +377,90 @@ public:
             m_headArrivalTime = Simulator::Now();
         }
         m_wqeSegmentVector.push_back(segment);
+        RefreshAllocatorSummary();
     }
+
+    bool TryAdmitWqeSegment(Ptr<UbWqeSegment> segment);
+    bool CanAdmitWqeSegment(Ptr<const UbWqeSegment> segment) const;
+    bool TryContinueAcceptedWqeSegment(Ptr<UbWqeSegment> segment);
+    bool CanContinueAcceptedWqeSegment(Ptr<const UbWqeSegment> segment) const;
+    bool IsAcceptingNewWorkForTest() const { return m_isActive; }
+    UbWqeSegmentTerminalDisposition TryCancelUnsentWqeSegment(
+        Ptr<UbWqeSegment> segment,
+        const UbTransactionCorrelationIdentity& expectedCorrelation,
+        const UbLifecycleResourceIdentity& expectedTpIdentity);
+    UbWqeSegmentTerminalDisposition ForceRemoveRetainedWqeSegment(
+        Ptr<UbWqeSegment> segment,
+        const UbTransactionCorrelationIdentity& expectedCorrelation,
+        const UbLifecycleResourceIdentity& expectedTpIdentity);
 
     uint32_t GetWqeSegmentVecSize() { return m_wqeSegmentVector.size(); }
     uint32_t GetActiveSendSegmentCount() const;
     uint32_t GetOutstandingUnackedSegmentCount() const;
     bool CanScheduleAnotherSegment() const;
 
-    Ptr<UbCongestionControl> GetCongestionCtrlForTest() const { return m_congestionCtrl; }
-    void SetCongestionControlForTest(Ptr<UbCongestionControl> cc) { m_congestionCtrl = cc; }
-    void EnqueueAckForTest(Ptr<Packet> p) { m_ackQ.push(p); }
-    void EnqueueCnpForTest(Ptr<Packet> p) { m_cnpQ.push(p); }
-    Ptr<Packet> GetNextPacketForTest() { return GetNextPacket(); }
-    uint32_t GetPendingAckCountForTest() const { return static_cast<uint32_t>(m_ackQ.size()); }
-    Ptr<Packet> PopAckForTest() { return GetNextPacket(); }
+    Ptr<UbCongestionControl> GetCongestionCtrlForTest() const
+    {
+        return m_congestionCtrl;
+    }
+
+    void SetCongestionControlForTest(Ptr<UbCongestionControl> cc)
+    {
+        m_congestionCtrl = cc;
+    }
+
+    void EnqueueAckForTest(Ptr<Packet> p)
+    {
+        m_ackQ.push(p);
+        RefreshAllocatorSummary();
+    }
+
+    void EnqueueCnpForTest(Ptr<Packet> p)
+    {
+        m_cnpQ.push(p);
+        RefreshAllocatorSummary();
+    }
+
+    void ClearCnpForTest()
+    {
+        while (!m_cnpQ.empty())
+        {
+            m_cnpQ.pop();
+        }
+        RefreshAllocatorSummary();
+    }
+
+    void ClearWqeSegmentsForTest()
+    {
+        m_wqeSegmentVector.clear();
+        RefreshAllocatorSummary();
+    }
+    void SetMaxQueueSizeForTest(uint64_t size) { m_maxQueueSize = size; }
+    void AddRemoteRequestForTest(Ptr<UbWqeSegment> segment) { m_remoteRequest.push_back(segment); }
+    void ClearRemoteRequestsForTest() { m_remoteRequest.clear(); }
+    void AddInboundTaUnitForTest(uint32_t srcTpn, uint64_t msn);
+    void ClearInboundTaUnitsForTest() { m_inboundTaUnits.clear(); }
+    void AddBufferedInboundPacketForTest(uint64_t psn);
+
+    void ClearBufferedInboundPacketsForTest()
+    {
+        m_bufferedInboundPackets.clear();
+    }
+
+    Ptr<Packet> GetNextPacketForTest()
+    {
+        return GetNextPacket();
+    }
+
+    uint32_t GetPendingAckCountForTest() const
+    {
+        return static_cast<uint32_t>(m_ackQ.size());
+    }
+
+    Ptr<Packet> PopAckForTest()
+    {
+        return GetNextPacket();
+    }
     uint32_t GetPendingCnpCountForTest() const { return static_cast<uint32_t>(m_cnpQ.size()); }
     uint64_t GetPsnSndUnaForTest() const { return m_psnSndUna; }
     void SetPsnSndUnaForTest(uint64_t psn) { m_psnSndUna = psn; }
@@ -306,9 +477,26 @@ public:
     {
         m_inboundTpMsnReferences[srcTpn] = reference;
     }
+
+    uint64_t GetInboundTpMsnReferenceForTest(uint32_t srcTpn) const
+    {
+        const auto reference = m_inboundTpMsnReferences.find(srcTpn);
+        return reference == m_inboundTpMsnReferences.end() ? 0 : reference->second;
+    }
     void SetInboundTaSsnReferenceForTest(uint32_t srcTpn, uint32_t iniRcId, uint32_t reference)
     {
         m_inboundTaSsnReferences[std::make_pair(srcTpn, iniRcId)] = reference;
+    }
+
+    uint32_t GetInboundTaSsnReferenceForTest(uint32_t srcTpn, uint32_t iniRcId) const
+    {
+        const auto reference = m_inboundTaSsnReferences.find(std::make_pair(srcTpn, iniRcId));
+        return reference == m_inboundTaSsnReferences.end() ? 0 : reference->second;
+    }
+
+    void SetLbHashSaltForTest(uint16_t salt)
+    {
+        m_lbHashSalt = salt;
     }
     uint32_t GetInboundTaUnitCountForTest() const
     {
@@ -321,6 +509,18 @@ public:
     bool WasPsnSelectivelyReportedMissingForTest(uint64_t psn) const;
     bool HasRetainedPsnForTest(uint64_t psn) const;
     uint32_t GetPsnRetransmitCountForTest(uint64_t psn) const;
+    uint32_t GetGbnDescriptorCountForTest() const;
+    bool HasGbnDescriptorForTest(uint64_t psn) const;
+    uint64_t GetGbnRetransmissionCursorForTest() const;
+    /** Whether a GBN retransmission is currently pending for the next packet pull. */
+    bool HasPendingGbnRetransmissionForTest() const
+    {
+        return m_retrans->HasPendingGbnRetransmission();
+    }
+    void RetainGbnDescriptorForTest(uint64_t psn);
+    bool IsRetransTimerRunningForTest() const;
+    void StartRetransTimerForTest() { m_retrans->StartTimerIfNeeded(); }
+    uint64_t GetSegmentBytesLeftForTest(uint32_t taskId) const;
 
     void SetBaseRto(Time rto);
     Time GetBaseRto() const;
@@ -345,8 +545,6 @@ public:
     uint64_t GetPsnSndNxt() const;
     void SetPsnSndNxt(uint64_t psn);
     uint64_t GetPsnRecvNxt() const;
-    uint32_t GetGbnRetransmissionProgressBytesFromPsn(uint64_t psn) const;
-    void ResetSegmentSendProgressFromPsn(uint64_t psn);
     void TriggerTransportTransmit();
     bool IsCcLimitedForRetransmission(uint32_t payloadBytes) const;
     void SetSendWindowLimited(bool limited);
@@ -361,10 +559,14 @@ public:
     uint64_t GetMaxRcvPsnForRetrans() const;
     TpOpcode GetResponseOpcodeForRetrans(bool selectiveAck) const;
 private:
+    friend class UbGbnRetransStrategy;
+    friend class UbSelectiveRetransStrategy;
+
     struct InboundTaUnitState
     {
         Ptr<UbWqeSegment> segment;
         uint32_t bytesReceived{0};
+        Ptr<Packet> explicitPayload;
     };
 
     struct BufferedInboundPacket
@@ -372,24 +574,14 @@ private:
         UbTransportHeader tpHeader;
         UbTransactionHeader taHeader;
         uint32_t resLenBytes{0};
+        uint64_t remoteAddress{0};
+        uint32_t remoteTokenId{0};
         uint32_t payloadBytes{0};
         uint32_t taskId{0};
-    };
-
-    struct ReceivedDataPacketContext
-    {
-        Ptr<Packet> packet;
-        UbDatalinkPacketHeader dataLinkHeader;
-        UbIpBasedNetworkHeader networkHeader;
-        Ipv4Header ipv4Header;
-        UdpHeader udpHeader;
-        UbTransportHeader transportHeader;
-        UbTransactionHeader transactionHeader;
-        UbMAExtTah maExtHeader;
-        UbFlowTag flowTag;
-        uint64_t psn{0};
-        uint32_t payloadBytes{0};
-        uint32_t resLenBytes{0};
+        bool hasTransactionCorrelation{false};
+        UbTransactionCorrelationIdentity transactionCorrelation;
+        Ptr<const Packet> explicitPayload;
+        UbTransactionFields transactionFields;
     };
 
     struct AckResponseContext
@@ -436,14 +628,24 @@ private:
     bool CanTrySendNewDataPacket();
     bool BuildNextDataSendContext(NewDataSendContext& ctx);
     Ptr<Packet> SendNewDataPacket(const NewDataSendContext& ctx);
-    void NotifyNewDataPacketSent(const NewDataSendContext& ctx, Ptr<Packet> packet);
+    UbGbnPacketDescriptor BuildGbnPacketDescriptor(const NewDataSendContext& ctx,
+                                                   uint64_t logicalPsn) const;
+    Ptr<Packet> BuildRtpDataPacket(const UbGbnPacketDescriptor& descriptor);
+    Ptr<Packet> SendGbnRetransmission(const UbGbnPacketDescriptor& descriptor);
+    Ptr<Packet> SendSelectiveRetransmission(const UbGbnPacketDescriptor& descriptor);
+    void NotifyDataPacketSent(const UbGbnPacketDescriptor& descriptor, Ptr<Packet> packet);
     void AdvanceNewDataSendState(const NewDataSendContext& ctx, Ptr<Packet> packet);
     Ptr<UbTransaction> GetTransaction();
-    Ptr<UbWqeSegment> TrackInboundTaPacket(const UbTransportHeader& tpHeader,
-                                           const UbTransactionHeader& taHeader,
-                                           uint32_t resLenBytes,
-                                           uint32_t payloadBytes,
-                                           uint32_t taskId);
+    Ptr<UbWqeSegment> TrackInboundTaPacket(const BufferedInboundPacket& packet);
+    /**
+     * Bytes one outgoing RTP data packet carries outside its payload.
+     *
+     * The transaction part is the rule-driven header plan that BuildRtpDataPacket serializes for
+     * this opcode, role, and field set; the stack part is the network stack the packet traverses.
+     */
+    uint32_t GetDataPacketHeaderBytes(UbTransactionOpcode opcode,
+                                      UbTransactionSegmentKind segmentKind,
+                                      const UbTransactionFields& fields) const;
     bool ShouldCompleteOnTpAck(const Ptr<UbWqeSegment>& segment) const;
     uint64_t GetCumulativeAckPsn() const;
     TpOpcode GetResponseOpcode(bool selectiveAck) const;
@@ -481,6 +683,7 @@ private:
                                       uint64_t psnEnd,
                                       AckResponseContext& response);
     void CompleteInboundTaUnits(const std::vector<Ptr<UbWqeSegment>>& completedTaUnits);
+    void NotifyLifecycleStateChanged();
 
     TracedCallback<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t> m_traceFirstPacketSendsNotify;
     TracedCallback<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t> m_traceLastPacketSendsNotify;
@@ -501,7 +704,8 @@ private:
                                   uint32_t tpMsn, uint32_t psn, uint32_t mDport);
     void WqeSegmentSendsNotify(uint32_t nodeId, uint32_t taskId, uint32_t taSsn);
     void WqeSegmentCompletesNotify(uint32_t nodeId, uint32_t taskId, uint32_t taSsn);
-    void TpRecvNotify(UbTpRecvTraceData data);
+    void TpRecvNotify(uint32_t packetUid, uint32_t psn, uint32_t src, uint32_t dst, uint32_t srcTpn, uint32_t dstTpn,
+                      PacketType type, uint32_t size, uint32_t taskId, std::string ackInfo, UbPacketTraceTag traceTag);
     // Node and controller references
     uint32_t m_nodeId;
 
@@ -510,6 +714,7 @@ private:
     uint32_t m_dest;
     uint32_t m_tpn;           // TP Number
     uint32_t m_dstTpn;
+    UbLifecycleResourceIdentity m_lifecycleOwner;
     uint64_t m_size;          // Size parameter
     uint16_t m_priority;      // Process group identifier
     uint16_t m_sport;
@@ -547,12 +752,12 @@ private:
 
     // Status flags
     bool m_isActive = true;
+    bool m_ownerControllerDisposing = false;
     bool m_tpFullFlag = false; // 记录tp队列状态是否满
     bool m_sendWindowLimited = false; // 记录发送窗口是否满
     uint64_t m_defaultMaxWqeSegNum;
     uint64_t m_defaultMaxInflightPacketSize;
-    bool m_usePacketSpray;
-    bool m_useShortestPaths;
+    RoutingType m_routingType{RoutingType::PER_FLOW_SHORTEST_PATHS};
     uint16_t m_lbHashSalt = 0; // load balance salt for ECMP/packet-spray hashing, increases per packet
 
     std::unique_ptr<UbRetransController> m_retrans;
@@ -561,6 +766,7 @@ private:
     IngressQueueType m_ingressQueueType = IngressQueueType::TP; // Transport channel queue type (TP)
 
     bool m_pktTraceEnabled = false;
+    Callback<void, uint32_t> m_lifecycleStateChangedCallback;
 };
 
 /**
@@ -577,6 +783,42 @@ public:
 
     UbTransportGroup();
     virtual ~UbTransportGroup();
+
+    void Init(const UbLifecycleResourceIdentity& identity,
+              const std::vector<UbTransportGroupMember>& members,
+              uint32_t initialSelectionCursor);
+    const UbLifecycleResourceIdentity& GetLifecycleIdentity() const;
+    uint64_t GetMembershipVersion() const;
+    uint32_t GetMemberCount() const;
+    uint32_t GetSelectionCursor() const;
+    uint32_t GetMemberIndexAtOffset(uint32_t offset) const;
+    const UbTransportGroupMember& GetMember(uint32_t index) const;
+    bool IsMemberSelectable(uint32_t index) const;
+    int32_t FindMemberIndex(const UbLifecycleResourceIdentity& tpIdentity) const;
+    void AddMember(const UbTransportGroupMember& member);
+    void MarkMemberRetiring(uint32_t index);
+    UbTransportGroupMember RemoveMember(uint32_t index);
+    void CommitSelection(uint32_t selectedIndex);
+    bool IsAcceptingNewOperations() const;
+    void FreezeNewOperations();
+    void ResumeNewOperations();
+    void SetPendingLastMemberRemoval(const UbLifecycleResourceIdentity& tpIdentity);
+    bool HasPendingLastMemberRemoval() const;
+    const UbLifecycleResourceIdentity& GetPendingLastMemberRemoval() const;
+    void ClearPendingLastMemberRemoval();
+    void RequestDestroy(UbTpgCleanupMode mode);
+    bool IsDestroyPending() const;
+    UbTpgCleanupMode GetCleanupMode() const;
+
+private:
+    UbLifecycleResourceIdentity m_identity;
+    std::vector<UbTransportGroupMember> m_members;
+    uint32_t m_selectionCursor{0};
+    bool m_acceptingNewOperations{true};
+    std::optional<UbLifecycleResourceIdentity> m_pendingLastMemberRemoval;
+    bool m_destroyRequested{false};
+    UbTpgCleanupMode m_cleanupMode{UbTpgCleanupMode::GRACEFUL};
+    uint64_t m_membershipVersion{1};
 };
 
 } // namespace ns3

@@ -61,13 +61,18 @@ public:
         return m_transportMode;
     }
 
-    /**
-     * @brief Get whether shortest paths are required.
-     * @return True when the application is configured to use shortest paths.
-     */
-    bool GetUseShortestPaths() const
+    RoutingType GetRoutingType() const
     {
-        return m_useShortestPaths;
+        return m_routingType;
+    }
+
+    /**
+     * @brief Return whether the standard driver should destroy its planned TP connections.
+     * @return True when planned driver-owned connections are destroyed after their last use.
+     */
+    bool IsPlannedTpConnectionDestroyEnabled() const
+    {
+        return m_enablePlannedTpConnectionDestroy;
     }
 
     void SetGetTpnRule(GetTpnRuleT type)
@@ -75,14 +80,9 @@ public:
         m_getTpnRule = type;
     }
 
-    void SetUseShortestPaths(bool useShortestPaths)
+    void SetRoutingType(RoutingType routingType)
     {
-        m_useShortestPaths = useShortestPaths;
-    }
-
-    void SetUsePacketSpray(bool usePacketSpray)
-    {
-        m_usePacketSpray = usePacketSpray;
+        m_routingType = routingType;
     }
 
     /**
@@ -91,6 +91,7 @@ public:
     void OnTaskCompleted(uint32_t taskId, uint32_t jettyNum);
     void OnTestTaskCompleted(uint32_t taskId, uint32_t jettyNum);
     void OnMemTaskCompleted(uint32_t taskId);
+    void CompleteComputeTask(uint32_t taskId);
 
     // ========== 回调函数 ==========
     void SetFinishCallback(Callback<void, uint32_t, uint32_t> cb, Ptr<UbJetty> jetty);
@@ -100,13 +101,30 @@ protected:
     void DoDispose(void) override;
 
 private:
+    friend class UbTrafficGen;
+
+    void CleanupCompletedTask(
+        uint32_t taskId,
+        uint32_t jettyNum,
+        bool destroyTaskScopedJetty,
+        bool releasePlannedTpBinding,
+        const std::vector<UbLifecycleResourceIdentity>& plannedTpConnections);
+    void OnTaskCompletedVisible(uint32_t taskId, uint32_t jettyNum);
+    std::map<std::pair<uint32_t, uint32_t>, EventId> m_completionVisibilityEvents;
+
     TracedCallback<uint32_t, uint32_t> m_traceMemTaskStartsNotify;
     TracedCallback<uint32_t, uint32_t> m_traceMemTaskCompletesNotify;
+    TracedCallback<uint32_t, uint32_t> m_traceComputeTaskQueuedNotify;
+    TracedCallback<uint32_t, uint32_t> m_traceComputeTaskStartsNotify;
+    TracedCallback<uint32_t, uint32_t> m_traceComputeTaskCompletesNotify;
     TracedCallback<uint32_t, uint32_t, uint32_t> m_traceWqeTaskStartsNotify;
     TracedCallback<uint32_t, uint32_t, uint32_t> m_traceWqeTaskCompletesNotify;
 
     void MemTaskStartsNotify(uint32_t nodeId, uint32_t taskId);
     void MemTaskCompletesNotify(uint32_t nodeId, uint32_t taskId);
+    void ComputeTaskQueuedNotify(uint32_t nodeId, uint32_t taskId);
+    void ComputeTaskStartsNotify(uint32_t nodeId, uint32_t taskId);
+    void ComputeTaskCompletesNotify(uint32_t nodeId, uint32_t taskId);
     void WqeTaskStartsNotify(uint32_t nodeId, uint32_t jettyNum, uint32_t taskId);
     void WqeTaskCompletesNotify(uint32_t nodeId, uint32_t jettyNum, uint32_t taskId);
     void WriteNotifyTaskStarts(uint32_t nodeId, uint32_t jettyNum, uint32_t baseTaskId);
@@ -114,10 +132,11 @@ private:
 
     // 控制器
     bool m_multiPathEnable = false;
+    bool m_enableTaskScopedJettyDestroy = false;
+    bool m_enablePlannedTpConnectionDestroy = false;
 
     GetTpnRuleT m_getTpnRule = GetTpnRuleT::BY_PEERNODE_PRIORITY;
-    bool m_useShortestPaths = true;
-    bool m_usePacketSpray = false;
+    RoutingType m_routingType{RoutingType::PER_FLOW_SHORTEST_PATHS};
     bool m_ctpUseUnboundSourceJetty = false;
     std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint8_t>, uint32_t>
         m_ctpBoundJettyByFullKey;
@@ -127,8 +146,8 @@ private:
 
     uint32_t m_jettyNum = 0;       // 当前节点维护的jettynum,不会重复
     TransportMode m_transportMode{TransportMode::RTP};
-    uint32_t m_localEntityId{0};
-    uint32_t m_peerEntityId{0};
+    uint32_t m_localEntityId{1};
+    uint32_t m_peerEntityId{1};
 
 };
 

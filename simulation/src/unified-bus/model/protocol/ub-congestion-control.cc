@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "ns3/ub-congestion-control.h"
+#include "ns3/ub-enum-accessor.h"
 #include "ns3/ub-caqm.h"
 #include "ns3/ub-dcqcn.h"
 #include "ns3/boolean.h"
@@ -14,8 +15,8 @@ NS_OBJECT_ENSURE_REGISTERED(UbCongestionControl);
 GlobalValue g_congestionCtrlAlgo =
     GlobalValue("UB_CC_ALGO",
                 "Host/switch congestion control algorithm.",
-                EnumValue(CongestionCtrlAlgo::CAQM),
-                MakeEnumChecker(CongestionCtrlAlgo::CAQM,
+                MakeUbEnumValue(CongestionCtrlAlgo::CAQM),
+                MakeUbEnumChecker(CongestionCtrlAlgo::CAQM,
                                 "CAQM",
                                 CongestionCtrlAlgo::DCQCN,
                                 "DCQCN"));
@@ -40,7 +41,7 @@ UbCongestionControl::UbCongestionControl()
     BooleanValue ccEnabledval;
     g_congestionCtrlEnabled.GetValue(ccEnabledval);
     m_congestionCtrlEnabled = ccEnabledval.Get();
-    EnumValue algoValue = EnumValue(0);
+    EnumValue algoValue;
     g_congestionCtrlAlgo.GetValue(algoValue);
     m_algoType = static_cast<CongestionCtrlAlgo>(algoValue.Get());
     NS_LOG_DEBUG("enabled: " << m_congestionCtrlEnabled << " algo:" << m_algoType);
@@ -61,7 +62,7 @@ UbCongestionControl::OnSwitchAttached(Ptr<UbSwitch> sw)
 
 Ptr<UbCongestionControl> UbCongestionControl::Create(UbNodeType_t nodeType)
 {
-    EnumValue val = EnumValue(0);
+    EnumValue val;
     g_congestionCtrlAlgo.GetValue(val);
     CongestionCtrlAlgo algo = static_cast<CongestionCtrlAlgo>(val.Get());
     if (algo == CAQM && nodeType == UB_DEVICE) {
