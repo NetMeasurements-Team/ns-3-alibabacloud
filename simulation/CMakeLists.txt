@@ -139,6 +139,9 @@ add_subdirectory(examples)
 # Build scratch/simulation scripts
 add_subdirectory(scratch)
 
+# Native ns-3 TestSuite runner (only built with NS3_TESTS).
+add_subdirectory(utils)
+
 write_lock()
 write_configtable()
 write_header_to_modules_map()

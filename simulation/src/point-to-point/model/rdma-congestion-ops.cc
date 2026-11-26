@@ -189,7 +189,7 @@ MellanoxDcqcn::UpdateAlpha(Ptr<RdmaQueuePair> q)
 void
 MellanoxDcqcn::ScheduleUpdateAlpha(Ptr<RdmaQueuePair> q)
 {
-    m_eventUpdateAlpha = Simulator::Schedule(MicroSeconds(m_alpha_resume_interval),
+    m_eventUpdateAlpha = Simulator::Schedule(NanoSeconds(m_alpha_resume_interval*1000),
                                              &MellanoxDcqcn::UpdateAlpha,
                                              this,
                                              q);
@@ -228,7 +228,7 @@ MellanoxDcqcn::CheckRateDecrease(Ptr<RdmaQueuePair> q)
         m_rpTimeStage = 0;
         m_decrease_cnp_arrived = false;
         Simulator::Cancel(m_rpTimer);
-        m_rpTimer = Simulator::Schedule(MicroSeconds(m_rpgTimeReset),
+        m_rpTimer = Simulator::Schedule(NanoSeconds(m_rpgTimeReset*1000),
                                         &MellanoxDcqcn::RateIncEventTimer,
                                         this,
                                         q);
@@ -241,7 +241,7 @@ MellanoxDcqcn::CheckRateDecrease(Ptr<RdmaQueuePair> q)
 void
 MellanoxDcqcn::ScheduleDecreaseRate(Ptr<RdmaQueuePair> q, uint32_t delta)
 {
-    m_eventDecreaseRate = Simulator::Schedule(MicroSeconds(m_rateDecreaseInterval),
+    m_eventDecreaseRate = Simulator::Schedule(NanoSeconds(m_rateDecreaseInterval*1000),
                                               &MellanoxDcqcn::CheckRateDecrease,
                                               this,
                                               q);
@@ -250,7 +250,7 @@ MellanoxDcqcn::ScheduleDecreaseRate(Ptr<RdmaQueuePair> q, uint32_t delta)
 void
 MellanoxDcqcn::RateIncEventTimer(Ptr<RdmaQueuePair> q)
 {
-    m_rpTimer = Simulator::Schedule(MicroSeconds(m_rpgTimeReset),
+    m_rpTimer = Simulator::Schedule(NanoSeconds(m_rpgTimeReset*1000),
                                     &MellanoxDcqcn::RateIncEventTimer,
                                     this,
                                     q);

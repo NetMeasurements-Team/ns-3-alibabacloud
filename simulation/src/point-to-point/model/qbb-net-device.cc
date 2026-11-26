@@ -19,6 +19,7 @@
  */
 
 #define __STDC_LIMIT_MACROS 1
+#include "ns3/abort.h"
 #include "ns3/qbb-net-device.h"
 
 #include "ns3/assert.h"
@@ -658,18 +659,19 @@ void
 QbbNetDevice::Resume(unsigned qIndex)
 {
     NS_LOG_FUNCTION(this << qIndex);
-    NS_ASSERT_MSG(m_paused[qIndex], "Must be PAUSEd");
+    NS_ABORT_MSG_IF(qIndex >= qCnt, "Invalid PFC priority");
+    if (!m_paused[qIndex])
+    {
+        return; // Duplicate XON is harmless.
+    }
     m_paused[qIndex] = false;
     NS_LOG_INFO("Node " << m_node->GetId() << " dev " << m_ifIndex << " queue " << qIndex
                         << " resumed at " << Simulator::Now().GetSeconds());
-    if (m_node->GetNodeType() == 2)
+    // A PFC priority is not a queue-pair index. Select the device's send path.
+    if (m_node->GetNodeType() == 2 && nvls_enable == 1)
     {
-        Ptr<RdmaQueuePair> lastQp = m_rdmaEQ->GetQp(qIndex);
-        if (lastQp->nvls_enable == 1)
-        {
-            SwitchAsHostSend();
-            return;
-        }
+        SwitchAsHostSend();
+        return;
     }
     DequeueAndTransmit();
 }
@@ -705,6 +707,7 @@ QbbNetDevice::Receive(Ptr<Packet> packet)
             return;
         }
         unsigned qIndex = ch.pfc.qIndex;
+        NS_ABORT_MSG_IF(qIndex >= qCnt, "Invalid received PFC priority");
         if (ch.pfc.time > 0)
         {
             m_tracePfc(1);
@@ -755,7 +758,9 @@ QbbNetDevice::SwitchSend(uint32_t qIndex, Ptr<Packet> packet, CustomHeader& ch)
 {
     m_macTxTrace(packet);
     m_traceEnqueue(packet, qIndex);
-    m_queue->Enqueue(packet, qIndex);
+    NS_ABORT_MSG_IF(qIndex >= qCnt, "Invalid switch queue priority");
+    const bool enqueued = m_queue->Enqueue(packet, qIndex);
+    NS_ABORT_MSG_IF(!enqueued, "Switch egress queue rejected a packet; MMU accounting cannot continue");
     // DequeueAndTransmit();
     SwitchDequeueAndTransmit();
     return true;

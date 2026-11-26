@@ -423,6 +423,9 @@ RdmaQueuePairGroup::RemoveFinishedQps(uint32_t& rr_last)
 void
 RdmaQueuePairGroup::Clear(void)
 {
+#ifdef NS3_MTP
+    MtpInterface::CriticalSection cs;
+#endif
     m_qps.clear();
 }
 
